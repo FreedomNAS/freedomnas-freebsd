@@ -157,7 +157,7 @@ for name in $COMPONENTS; do
     strip_bytecode "$stage"
     # Shipped in the package, so Python never writes a __pycache__ of its
     # own that `pkg delete` would leave behind.
-    python3 -m compileall -q --invalidation-mode unchecked-hash \
+    python3 -m compileall -q --invalidation-mode checked-hash \
         -s "$stage" -p / "$stage$ROOT" >/dev/null
     if [ -f "$src/README.md" ]; then
         install -d "$stage/usr/local/share/doc/$name"
