@@ -36,9 +36,9 @@ architecture-independent (`FreeBSD:15:*`), but pkg still refuses a package
 built for another major version, so each major gets its own tree.
 
 freedomnas-core is not built as a wheel, because its `pyproject.toml` needs
-setuptools 77 and FreeBSD's is older. It is installed the way the Gentoo
-ebuild installs it: the package under `/usr/lib/freedomnas/core`, put on
-`sys.path` by a `.pth` file in site-packages.
+setuptools 77 and FreeBSD's is older. It is installed the way every edition
+installs it: the package under `<root>/core`, put on `sys.path` by a `.pth`
+file in site-packages.
 
 ## Layout
 
@@ -51,10 +51,11 @@ out/freedomnas.pub
 Only `bin/` and this file are tracked. `out/` is rebuilt from them, and
 `*.key` never leaves the build machine.
 
-The files go under `/usr/lib/freedomnas`, not `/usr/local`, because
-firstboot.sh, supervisor.sh, the crontab and the installer all look for
-them there. A port for the official ports tree will have to move them
-under `/usr/local` first.
+The root the files go under is not written in the script: it is
+`paths.install_root` in freedomnas-profiles' `os/os-freebsd.json`,
+`/usr/local/lib/freedomnas`. Every installed component finds the others
+relative to its own location, and the configuration lives where the same
+profile's `paths.config_dir` says, `/usr/local/etc/freedomnas`.
 
 ## Using it
 

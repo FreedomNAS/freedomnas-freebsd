@@ -9,15 +9,15 @@
 #
 # Nothing here is compiled: the four packages are Python and JSON, so each is
 # a staging directory laid out the way the .deb, the PKGBUILD and the Gentoo
-# ebuild lay it out, handed to `pkg create` with a manifest. The layout lives
-# under /usr/lib/freedomnas because firstboot.sh, supervisor.sh, the crontab
-# and the installer all look for it there; a port for the official tree will
-# have to move it under /usr/local first.
+# ebuild lay it out, handed to `pkg create` with a manifest. The root the
+# files go under is not decided here: it is `paths.install_root` in
+# freedomnas-profiles' os/os-freebsd.json (/usr/local/lib/freedomnas), and
+# every installed component finds the others relative to itself.
 #
 # freedomnas-core is not built as a wheel: its pyproject.toml needs
-# setuptools 77, and FreeBSD's is older. It is installed the way the Gentoo
-# ebuild installs it — the package directory under /usr/lib/freedomnas/core,
-# put on sys.path by a .pth file.
+# setuptools 77, and FreeBSD's is older. It is installed the way every
+# edition installs it — the package directory under <root>/core, put on
+# sys.path by a .pth file.
 #
 # The dependencies are resolved against the FreeBSD repository this machine
 # uses, so it runs on FreeBSD, after a `pkg update`.
@@ -40,9 +40,11 @@ done
 
 ABI="${ABI:-$(pkg config abi | cut -d: -f1-2)}"
 # The flavor the python3 metaport points at: python312 -> py312.
-PYFLAVOR="${PYFLAVOR:-$(pkg rquery '%dn' python3 | sed -n 's/^python\([0-9]*\)$/py\1/p' | head -n 1)}"
+PYFLAVOR="${PYFLAVOR:-$(pkg rquery -U '%dn' python3 | sed -n 's/^python\([0-9]*\)$/py\1/p' | head -n 1)}"
 [ -n "$PYFLAVOR" ] || { echo "build-freedomnas-pkgs.sh: cannot tell the default Python flavor — run pkg update" >&2; exit 1; }
 SITE_DIR="$(python3 -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+ROOT="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["paths"]["install_root"])' \
+    "$SRC_ROOT/freedomnas-profiles/os/os-freebsd.json")"
 
 ALL="$OUT/$ABI:$REPO_ARCH/latest/All"
 install -d "$ALL"
@@ -63,7 +65,7 @@ dep_entry() {
         version="$(version_of "$1")"
         ;;
     *)
-        line="$(pkg rquery '%o %v' "$1" | head -n 1)"
+        line="$(pkg rquery -U '%o %v' "$1" | head -n 1)"
         [ -n "$line" ] || { echo "build-freedomnas-pkgs.sh: $1 is not in the FreeBSD repository" >&2; exit 1; }
         origin="${line% *}"
         version="${line#* }"
@@ -85,24 +87,24 @@ strip_bytecode() {
 }
 
 stage_profiles() {
-    dest="$1/usr/lib/freedomnas/profiles"
+    dest="$1$ROOT/profiles"
     install -d "$dest"
     ( cd "$2" && cp -R os init installer storage network shares users packages assets "$dest/" )
 }
 
 stage_core() {
-    dest="$1/usr/lib/freedomnas/core/freedomnas"
+    dest="$1$ROOT/core/freedomnas"
     install -d "$dest"
     ( cd "$2" && cp -R *.py modules "$dest/" )
     rm -f "$dest/conftest.py"
     install -d "$1$SITE_DIR"
-    echo /usr/lib/freedomnas/core > "$1$SITE_DIR/freedomnas-core.pth"
+    echo "$ROOT/core" > "$1$SITE_DIR/freedomnas-core.pth"
     install -d "$1/usr/local/bin"
     install -m 755 "$2/bin/freedomnas" "$1/usr/local/bin/freedomnas"
 }
 
 stage_webui() {
-    dest="$1/usr/lib/freedomnas/webui"
+    dest="$1$ROOT/webui"
     install -d "$dest/bin"
     ( cd "$2" && cp -R api frontend websocket "$dest/" )
     # Shared verbatim with the image builder, so they stay in
@@ -112,11 +114,11 @@ stage_webui() {
 }
 
 stage_installer() {
-    dest="$1/usr/lib/freedomnas/installer"
+    dest="$1$ROOT/installer"
     install -d "$dest/lib" "$1/usr/local/bin"
     install -m 755 "$2/setup.py" "$dest/setup.py"
     install -m 644 "$2"/lib/*.py "$dest/lib/"
-    ln -s /usr/lib/freedomnas/installer/setup.py "$1/usr/local/bin/freedomnas-install"
+    ln -s "$ROOT/installer/setup.py" "$1/usr/local/bin/freedomnas-install"
 }
 
 for name in $COMPONENTS; do
@@ -147,7 +149,7 @@ for name in $COMPONENTS; do
     esac
 
     version="$(version_of "$name")"
-    echo "==> $name $version ($ABI)"
+    echo "==> $name $version ($ABI, $ROOT)"
 
     stage="$WORK/$name/stage"
     install -d "$stage"
@@ -156,7 +158,7 @@ for name in $COMPONENTS; do
     # Shipped in the package, so Python never writes a __pycache__ of its
     # own that `pkg delete` would leave behind.
     python3 -m compileall -q --invalidation-mode unchecked-hash \
-        -s "$stage" -p / "$stage/usr/lib/freedomnas" >/dev/null
+        -s "$stage" -p / "$stage$ROOT" >/dev/null
     if [ -f "$src/README.md" ]; then
         install -d "$stage/usr/local/share/doc/$name"
         install -m 644 "$src/README.md" "$stage/usr/local/share/doc/$name/README.md"
@@ -195,7 +197,7 @@ EOF
         echo "@owner root"
         echo "@group wheel"
         ( cd "$stage" && find . \( -type f -o -type l \) ) | sed 's|^\.||' | sort
-        ( cd "$stage" && find ./usr/lib/freedomnas -type d; find ./usr/local/share/doc -mindepth 1 -type d 2>/dev/null ) \
+        ( cd "$stage" && find ".$ROOT" -type d; find ./usr/local/share/doc -mindepth 1 -type d 2>/dev/null ) \
             | sed 's|^\.|@dir |' | sort -r
     } > "$WORK/$name/plist"
 
