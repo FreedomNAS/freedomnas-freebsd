@@ -2,13 +2,14 @@
 # Build the FreedomNAS packages from the checkouts beside this repository and
 # drop them into the repository tree.
 #
-#   bin/build-freedomnas-pkgs.sh                     # all four
+#   bin/build-freedomnas-pkgs.sh                     # all five
 #   bin/build-freedomnas-pkgs.sh freedomnas-webui    # one of them
 #   SNAPSHOT=1 bin/build-freedomnas-pkgs.sh          # ...at 1.0.<stamp>
 #   ABI=FreeBSD:14 bin/build-freedomnas-pkgs.sh      # for another major version
 #
-# Nothing here is compiled: the four packages are Python and JSON, so each is
-# a staging directory laid out the way the .deb, the PKGBUILD and the Gentoo
+# Nothing here is compiled but the documentation, which mkdocs turns into a
+# static site; the other packages are Python and JSON. Each is a staging
+# directory laid out the way the .deb, the PKGBUILD and the Gentoo
 # ebuild lay it out, handed to `pkg create` with a manifest. The root the
 # files go under is not decided here: it is `paths.install_root` in
 # freedomnas-profiles' os/os-freebsd.json (/usr/local/lib/freedomnas), and
@@ -25,11 +26,20 @@ set -eu
 
 REPO_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 SRC_ROOT="$(dirname "$REPO_DIR")"
-DEFAULT_COMPONENTS="freedomnas-profiles freedomnas-core freedomnas-webui freedomnas-installer"
+DEFAULT_COMPONENTS="freedomnas-profiles freedomnas-core freedomnas-docs freedomnas-webui freedomnas-installer"
 COMPONENTS="${*:-$DEFAULT_COMPONENTS}"
 OUT="${OUT:-$REPO_DIR/out}"
 REPO_ARCH="${REPO_ARCH:-amd64}"
 MAINTAINER="dev@freedomnas.io"
+
+case " $COMPONENTS " in
+*" freedomnas-docs "*)
+    command -v mkdocs >/dev/null || {
+        echo "build-freedomnas-pkgs.sh: mkdocs not found — pkg install $(pkg rquery -U '%dn' python3 | sed -n 's/^python\([0-9]*\)$/py\1/p' | head -n 1)-mkdocs-material" >&2
+        exit 1
+    }
+    ;;
+esac
 
 for tool in pkg python3 git; do
     command -v "$tool" >/dev/null || {
@@ -103,10 +113,18 @@ stage_core() {
     install -m 755 "$2/bin/freedomnas" "$1/usr/local/bin/freedomnas"
 }
 
+stage_docs() {
+    dest="$1$ROOT/docs"
+    install -d "$dest"
+    FREEDOMNAS_DOCS_VERSION="$label" mkdocs build --quiet \
+        --config-file "$2/mkdocs.yml" --site-dir "$dest"
+}
+
 stage_webui() {
     dest="$1$ROOT/webui"
     install -d "$dest/bin"
     ( cd "$2" && cp -R api frontend websocket "$dest/" )
+    echo "$label" > "$dest/VERSION"
     # Shared verbatim with the image builder, so they stay in
     # freedomnas-profiles/assets rather than being copied here.
     ln -s ../../profiles/assets/firstboot.sh "$dest/bin/firstboot.sh"
@@ -125,6 +143,7 @@ for name in $COMPONENTS; do
     src="$SRC_ROOT/$name"
     [ -d "$src" ] || { echo "build-freedomnas-pkgs.sh: no checkout at $src" >&2; exit 1; }
 
+    licenses="MPL20"
     case "$name" in
     freedomnas-profiles)
         comment="FreedomNAS OS profiles, the JSON translator layer"
@@ -134,9 +153,14 @@ for name in $COMPONENTS; do
         comment="FreedomNAS core engine, OS-agnostic storage appliance"
         deps="freedomnas-profiles python3 $PYFLAVOR-pyyaml $PYFLAVOR-cryptography"
         ;;
+    freedomnas-docs)
+        comment="FreedomNAS documentation, for reading offline in the WebUI"
+        deps=""
+        licenses="MPL20 OFL11"
+        ;;
     freedomnas-webui)
         comment="FreedomNAS web interface"
-        deps="freedomnas-core freedomnas-profiles python3 $PYFLAVOR-fastapi $PYFLAVOR-uvicorn $PYFLAVOR-websockets $PYFLAVOR-Jinja2 $PYFLAVOR-python-pam $PYFLAVOR-pyyaml"
+        deps="freedomnas-core freedomnas-profiles freedomnas-docs python3 $PYFLAVOR-fastapi $PYFLAVOR-uvicorn $PYFLAVOR-websockets $PYFLAVOR-Jinja2 $PYFLAVOR-python-pam $PYFLAVOR-pyyaml"
         ;;
     freedomnas-installer)
         comment="Profile-driven FreedomNAS installer"
@@ -149,6 +173,11 @@ for name in $COMPONENTS; do
     esac
 
     version="$(version_of "$name")"
+    base="$("$REPO_DIR/bin/version.sh" "$src")"
+    case "$version" in
+    "$base") label="$version" ;;
+    *) label="$base+${version#"$base".}" ;;
+    esac
     echo "==> $name $version ($ABI, $ROOT)"
 
     stage="$WORK/$name/stage"
@@ -164,7 +193,7 @@ for name in $COMPONENTS; do
         install -m 644 "$src/README.md" "$stage/usr/local/share/doc/$name/README.md"
     fi
 
-    NAME="$name" VERSION="$version" COMMENT="$comment" ABI="$ABI" MAINTAINER="$MAINTAINER" \
+    NAME="$name" VERSION="$version" COMMENT="$comment" ABI="$ABI" MAINTAINER="$MAINTAINER" LICENSES="$licenses" \
     DEPS="{$(deps_json $deps)}" COMMIT="$(git -C "$src" log -1 --format=%H 2>/dev/null || echo unknown)" \
     README="$src/README.md" python3 - > "$WORK/$name/manifest" <<'EOF'
 import json, os
@@ -185,8 +214,8 @@ print(json.dumps({
     "www": "https://codeberg.org/FreedomNAS/" + e["NAME"],
     "abi": e["ABI"] + ":*",
     "prefix": "/usr/local",
-    "licenselogic": "single",
-    "licenses": ["MPL20"],
+    "licenselogic": "single" if len(e["LICENSES"].split()) == 1 else "and",
+    "licenses": e["LICENSES"].split(),
     "categories": ["sysutils"],
     "deps": json.loads(e["DEPS"]),
     "annotations": {"freedomnas_commit": e["COMMIT"]},

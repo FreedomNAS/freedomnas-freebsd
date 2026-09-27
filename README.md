@@ -1,13 +1,14 @@
 # freedomnas-freebsd
 
-A pkg repository for FreedomNAS on FreeBSD: the four FreedomNAS packages,
+A pkg repository for FreedomNAS on FreeBSD: the five FreedomNAS packages,
 built from the checkouts beside this one.
 
 | Package | Depends on (FreeBSD's own repository) |
 |---------|----------------------------------------|
 | `freedomnas-profiles` | — |
 | `freedomnas-core` | `python3`, `py312-pyyaml`, `py312-cryptography` |
-| `freedomnas-webui` | `py312-fastapi`, `-uvicorn`, `-websockets`, `-Jinja2`, `-python-pam`, `-pyyaml` |
+| `freedomnas-docs` | — (built with `py312-mkdocs-material`) |
+| `freedomnas-webui` | `freedomnas-docs`, `py312-fastapi`, `-uvicorn`, `-websockets`, `-Jinja2`, `-python-pam`, `-pyyaml` |
 | `freedomnas-installer` | `python3`, `cdialog`, `curl` |
 
 Everything else FreedomNAS installs on FreeBSD is already in FreeBSD's
@@ -17,11 +18,12 @@ bhyve, the NFS server, efibootmgr). The `py312` flavor is whatever the
 
 ## Building
 
-On FreeBSD, after `pkg update`, with the four FreedomNAS checkouts beside
-this one and `python3` and `git` installed:
+On FreeBSD, after `pkg update`, with the five FreedomNAS checkouts beside
+this one and `python3`, `git` and — for freedomnas-docs —
+`py312-mkdocs-material` installed:
 
 ```sh
-bin/build-freedomnas-pkgs.sh                    # all four
+bin/build-freedomnas-pkgs.sh                    # all five
 bin/build-freedomnas-pkgs.sh freedomnas-webui   # one of them
 SNAPSHOT=1 bin/build-freedomnas-pkgs.sh         # ...as 1.0.<yyyymmddhhmm>
 ABI=FreeBSD:14 bin/build-freedomnas-pkgs.sh     # for another major version
@@ -30,8 +32,12 @@ SIGNING_KEY=freedomnas.key bin/make-repo.sh     # the signed catalogue
 ```
 
 The version is the upstream half of each component's `debian/changelog`,
-the same number freedomnas-deb publishes. Nothing is compiled: each package
-is a staging directory handed to `pkg create`. The packages are
+the same number freedomnas-deb publishes. Nothing is compiled but the
+documentation, which mkdocs builds into a static site under `<root>/docs`
+for the WebUI to serve offline; each package is a staging directory handed
+to `pkg create`. The WebUI's `VERSION` file and the documentation carry the
+FreedomNAS form of the version, `1.0+<yyyymmddhhmm>` for a snapshot, so the
+documentation can tell whether it belongs to the same release. The packages are
 architecture-independent (`FreeBSD:15:*`), but pkg still refuses a package
 built for another major version, so each major gets its own tree.
 
