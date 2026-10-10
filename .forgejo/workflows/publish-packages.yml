@@ -100,7 +100,7 @@ jobs:
           [ -n "$FREEBSD_SIGNING_KEY" ] || { echo "the FREEBSD_SIGNING_KEY secret is not set" >&2; exit 1; }
           key="${RUNNER_TEMP:-/tmp}/freedomnas-freebsd.key"
           ( umask 077 && printf '%s\n' "$FREEBSD_SIGNING_KEY" > "$key" )
-          sudo env SNAPSHOT="$SNAPSHOT" SIGNING_KEY="$key" FREEBSD_RELEASE="$FREEBSD_RELEASE" \
+          sudo env SNAPSHOT="$SNAPSHOT" SIGNING_KEY="$key" FREEBSD_RELEASE="$FREEBSD_RELEASE" FNAS_CACHE_DIR=/var/cache/freedomnas-ci/freebsd \
             sh freedomnas-freebsd/ci/build-in-vm.sh "$PWD/out"
           rm -f "$key"
           sudo chown -R "$(id -u):$(id -g)" out
