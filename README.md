@@ -63,29 +63,58 @@ The root the files go under is not written in the script: it is
 relative to its own location, and the configuration lives where the same
 profile's `paths.config_dir` says, `/usr/local/etc/freedomnas`.
 
+## Published repository
+
+`.forgejo/workflows/publish-packages.yml` builds the packages on the
+self-hosted runner and publishes them to Codeberg's generic registry, where
+a FreeBSD machine reads them as a pkg repository:
+
+```
+https://codeberg.org/api/packages/FreedomNAS/generic/freedomnas-freebsd/<major>-<group>
+```
+
+| Run | Builds | Published as |
+|-----|--------|--------------|
+| `ref: dev` (also every night) | every component at `dev`, versioned `X.Y.Z.<commit stamp>` | `15-dev` |
+| `ref: main` | the newest release tag, `vX.Y.Z` | `15-main` |
+
+`ci/build-in-vm.sh` does the FreeBSD part from Linux: it boots FreeBSD's own
+VM image under QEMU with freedomnas-image-builder's driver (that checkout
+must sit beside this one), runs `ci/build-in-guest.sh` there —
+`bin/build-freedomnas-pkgs.sh`, then `pkg repo` with the signing key — and
+reads the result back from a scratch disk, with the guest's log. The
+catalogue is flat, the packages beside `meta.conf` and `packagesite.pkg`,
+because the registry has no directories. `bin/publish-codeberg.sh` uploads
+it, replacing files with the same name, and removes the packages the new
+catalogue no longer lists.
+
+Secrets: the private signing key as `FREEBSD_SIGNING_KEY` (the PEM of
+`freedomnas.key`, which stays out of git), and the organisation's
+`PACKAGE_REGISTRY_USER` / `PACKAGE_REGISTRY_TOKEN`. The public key is
+`keys/freedomnas.pub` (sha256 `72828ec3…f6baf32a`), the same one
+freedomnas-profiles' `installer/installer-freebsd.json` writes.
+
 ## Using it
 
-On the FreedomNAS machine, with the public key in
-`/usr/local/etc/ssl/freedomnas.pub`:
+freedomnas-installer writes both files on the FreedomNAS machine: the
+public key as `/usr/local/etc/ssl/freedomnas.pub`, and
+`/usr/local/etc/pkg/repos/FreedomNAS.conf`:
 
-```sh
-mkdir -p /usr/local/etc/pkg/repos
-cat > /usr/local/etc/pkg/repos/FreedomNAS.conf <<'EOF'
+```
 FreedomNAS: {
-  url: "file:///path/to/out/${ABI}/latest",
+  url: "https://codeberg.org/api/packages/FreedomNAS/generic/freedomnas-freebsd/${VERSION_MAJOR}-main",
   signature_type: "pubkey",
   pubkey: "/usr/local/etc/ssl/freedomnas.pub",
   enabled: yes
 }
-EOF
-pkg update && pkg install freedomnas-webui
 ```
 
-A hosted copy only changes the `url`. Verified on FreeBSD 15.1-RELEASE:
-the signed catalogue installs all four packages together with their 36
-dependencies from FreeBSD's repository, the WebUI starts from
-`supervisor.sh` and serves `/setup/`, and `pkg delete` leaves nothing
-behind.
+Then `pkg update && pkg install freedomnas-webui`. pkg expands
+`${VERSION_MAJOR}` itself, so a machine follows its own major version. For a
+local build, `url` is `file:///path/to/out/${ABI}/latest`. Verified on
+FreeBSD 15.1-RELEASE: the signed flat catalogue, served over HTTP, installs
+the five packages with their FreeBSD dependencies, and the core and the
+WebUI import.
 
 ## License
 

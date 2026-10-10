@@ -1,0 +1,122 @@
+name: publish-packages
+
+# Builds the five FreedomNAS packages inside FreeBSD's own VM image
+# (ci/build-in-vm.sh, through freedomnas-image-builder's QEMU driver) and
+# publishes the signed catalogue to Codeberg's generic registry as
+# freedomnas-freebsd/<major>-<group> (bin/publish-codeberg.sh).
+#
+# ref dev builds every component at dev, as snapshots, into <major>-dev;
+# ref main builds the newest release tag (vX.Y.Z) into <major>-main.
+# Runs on the self-hosted runner's host, as root through sudo, like
+# build-images: QEMU needs KVM.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch of the component repositories to build (dev or main)"
+        type: string
+        default: dev
+  schedule:
+    - cron: "57 4 * * *"
+
+env:
+  REF: ${{ inputs.ref || 'dev' }}
+  GROUP: ${{ inputs.ref == 'main' && 'main' || 'dev' }}
+  MAJOR: "15"
+  FREEBSD_RELEASE: 15.1-RELEASE
+
+jobs:
+  publish:
+    runs-on: [self-hosted, image-builder]
+    steps:
+      - name: Pick the ref to build
+        run: |
+          ref="$REF"
+          if [ "$ref" = main ]; then
+            ref="$(git ls-remote --tags --refs https://codeberg.org/FreedomNAS/freedomnas-core.git 'v*' \
+              | sed 's|.*refs/tags/||' | grep -E '^v[0-9]+(\.[0-9]+)*$' | sort -V | tail -n 1)"
+            [ -n "$ref" ] || { echo "no release tag on freedomnas-core" >&2; exit 1; }
+            echo "SNAPSHOT=" >> "$GITHUB_ENV"
+          else
+            echo "SNAPSHOT=1" >> "$GITHUB_ENV"
+          fi
+          echo "Building $ref"
+          echo "SRC_REF=$ref" >> "$GITHUB_ENV"
+
+      - name: Check out freedomnas-freebsd
+        uses: actions/checkout@v4
+        with:
+          path: freedomnas-freebsd
+
+      - name: Check out freedomnas-image-builder
+        uses: actions/checkout@v4
+        with:
+          repository: FreedomNAS/freedomnas-image-builder
+          ref: dev
+          path: freedomnas-image-builder
+
+      - name: Stop what an earlier job left running
+        run: sudo sh freedomnas-image-builder/ci/stop-leftovers.sh
+
+      - name: Check out freedomnas-profiles
+        uses: actions/checkout@v4
+        with:
+          repository: FreedomNAS/freedomnas-profiles
+          ref: ${{ env.SRC_REF }}
+          path: freedomnas-profiles
+
+      - name: Check out freedomnas-core
+        uses: actions/checkout@v4
+        with:
+          repository: FreedomNAS/freedomnas-core
+          ref: ${{ env.SRC_REF }}
+          path: freedomnas-core
+
+      - name: Check out freedomnas-docs
+        uses: actions/checkout@v4
+        with:
+          repository: FreedomNAS/freedomnas-docs
+          ref: ${{ env.SRC_REF }}
+          path: freedomnas-docs
+
+      - name: Check out freedomnas-webui
+        uses: actions/checkout@v4
+        with:
+          repository: FreedomNAS/freedomnas-webui
+          ref: ${{ env.SRC_REF }}
+          path: freedomnas-webui
+
+      - name: Check out freedomnas-installer
+        uses: actions/checkout@v4
+        with:
+          repository: FreedomNAS/freedomnas-installer
+          ref: ${{ env.SRC_REF }}
+          path: freedomnas-installer
+
+      - name: Build in the FreeBSD VM
+        env:
+          FREEBSD_SIGNING_KEY: ${{ secrets.FREEBSD_SIGNING_KEY }}
+        run: |
+          [ -n "$FREEBSD_SIGNING_KEY" ] || { echo "the FREEBSD_SIGNING_KEY secret is not set" >&2; exit 1; }
+          key="${RUNNER_TEMP:-/tmp}/freedomnas-freebsd.key"
+          ( umask 077 && printf '%s\n' "$FREEBSD_SIGNING_KEY" > "$key" )
+          sudo env SNAPSHOT="$SNAPSHOT" SIGNING_KEY="$key" FREEBSD_RELEASE="$FREEBSD_RELEASE" \
+            sh freedomnas-freebsd/ci/build-in-vm.sh "$PWD/out"
+          rm -f "$key"
+          sudo chown -R "$(id -u):$(id -g)" out
+
+      - name: Publish
+        env:
+          CODEBERG_USER: ${{ secrets.PACKAGE_REGISTRY_USER }}
+          CODEBERG_TOKEN: ${{ secrets.PACKAGE_REGISTRY_TOKEN }}
+        run: sh freedomnas-freebsd/bin/publish-codeberg.sh "$PWD/out"
+
+      - name: Stop what this job left running
+        if: always()
+        run: sudo sh freedomnas-image-builder/ci/stop-leftovers.sh
+
+      - name: Give the workspace back to the runner
+        if: always()
+        run: |
+          rm -f "${RUNNER_TEMP:-/tmp}/freedomnas-freebsd.key"
+          sudo chown -R "$(id -u):$(id -g)" .
