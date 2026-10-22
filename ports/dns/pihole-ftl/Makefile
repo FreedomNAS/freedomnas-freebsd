@@ -1,6 +1,6 @@
 PORTNAME=	pihole-ftl
 DISTVERSION=	6.8
-PORTREVISION=	1
+PORTREVISION=	2
 CATEGORIES=	dns
 MASTER_SITES=	https://codeberg.org/FreedomNAS/pihole-ftl-freebsd/archive/
 DISTNAME=	${FTL_COMMIT}
@@ -21,7 +21,7 @@ LIB_DEPENDS=	libgmp.so:math/gmp \
 
 USES=		cmake pkgconfig readline
 
-FTL_COMMIT=	b69250d8d9f9b6f6e3bb6fd992b661a8d643e356
+FTL_COMMIT=	46a4fa0d39b4f8e693124c33b24dc66c85afc96b
 
 WRKSRC=		${WRKDIR}/pihole-ftl-freebsd
 
