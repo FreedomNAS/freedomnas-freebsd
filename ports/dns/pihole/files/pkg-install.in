@@ -2,11 +2,21 @@
 
 case "$2" in
 PRE-INSTALL)
+	# A system ID below 1000 like the ports' own users (UIDs/GIDs): from 1000
+	# on, IDs belong to people, and FreedomNAS removes the ones it does not know
+	taken() { pw usershow -u "$1" >/dev/null 2>&1 || pw groupshow -g "$1" >/dev/null 2>&1; }
+	id=829
+	if taken "$id"; then
+		id=999
+		while [ "$id" -gt 100 ] && taken "$id"; do
+			id=$((id - 1))
+		done
+	fi
 	if ! pw groupshow pihole >/dev/null 2>&1; then
-		pw groupadd pihole
+		pw groupadd pihole -g "$id"
 	fi
 	if ! pw usershow pihole >/dev/null 2>&1; then
-		pw useradd pihole -g pihole -c "Pi-hole" -d /nonexistent -s /usr/sbin/nologin
+		pw useradd pihole -u "$id" -g pihole -c "Pi-hole" -d /nonexistent -s /usr/sbin/nologin
 	fi
 	;;
 POST-INSTALL)

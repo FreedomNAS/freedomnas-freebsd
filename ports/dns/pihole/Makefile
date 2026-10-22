@@ -1,5 +1,6 @@
 PORTNAME=	pihole
 DISTVERSION=	6.5
+PORTREVISION=	1
 CATEGORIES=	dns www
 MASTER_SITES=	https://codeberg.org/FreedomNAS/pihole-core-freebsd/archive/:core
 DISTFILES=	${CORE_COMMIT}.tar.gz:core
