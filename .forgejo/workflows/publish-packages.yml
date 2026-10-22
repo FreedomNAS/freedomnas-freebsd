@@ -1,8 +1,8 @@
 name: publish-packages
 
-# Builds the five FreedomNAS packages, and the community modules
+# Builds the five FreedomNAS packages, the community modules
 # (freedomnas-module-<id>, from each module's dev branch or its own newest
-# vX.Y.Z tag), inside FreeBSD's own VM image
+# vX.Y.Z tag) and the ports under ports/ (Pi-hole), inside FreeBSD's own VM image
 # (ci/build-in-vm.sh, through freedomnas-image-builder's QEMU driver) and
 # publishes the signed catalogue to Codeberg's generic registry as
 # freedomnas-freebsd/<major>-<group> (bin/publish-codeberg.sh).

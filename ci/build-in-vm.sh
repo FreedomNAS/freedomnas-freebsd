@@ -49,7 +49,7 @@ for name in $COMPONENTS ${MODULES:-}; do
     echo "    $name $(git -C "$SEED/src/$name" log -1 --format='%h %cd' --date=iso-strict)"
 done
 mkdir -p "$SEED/src/freedomnas-freebsd"
-cp -R "$REPO_DIR/bin" "$REPO_DIR/ci" "$SEED/src/freedomnas-freebsd/"
+cp -R "$REPO_DIR/bin" "$REPO_DIR/ci" "$REPO_DIR/ports" "$SEED/src/freedomnas-freebsd/"
 tar -cf "$SEED/src.tar" -C "$SEED/src" .
 rm -rf "$SEED/src"
 if [ -n "${SIGNING_KEY:-}" ]; then

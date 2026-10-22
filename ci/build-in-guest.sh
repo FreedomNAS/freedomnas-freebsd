@@ -1,6 +1,6 @@
 #!/bin/sh
 # Runs inside FreeBSD's VM image (ci/build-in-vm.sh): builds the packages
-# with bin/build-freedomnas-pkgs.sh, writes a flat signed catalogue and puts
+# with bin/build-freedomnas-pkgs.sh and the ports with bin/build-ports.sh, writes a flat signed catalogue and puts
 # a tar of it at the start of the scratch disk. Ends with `poweroff` either
 # way; on failure the scratch disk stays empty.
 #
@@ -50,6 +50,9 @@ if [ -n "${MODULES:-}" ]; then
     # shellcheck disable=SC2086
     OUT="$WORK/out" SNAPSHOT="$SNAPSHOT" sh bin/build-freedomnas-pkgs.sh $MODULES || fail "build-freedomnas-pkgs.sh $MODULES"
 fi
+
+log "=== Ports ==="
+OUT="$WORK/out" PORTSDIR="$WORK/ports" sh bin/build-ports.sh || fail "build-ports.sh"
 
 log "=== Catalogue ==="
 FLAT="$WORK/flat"
