@@ -1,0 +1,8 @@
+Pi-hole is a network-wide ad blocker: a DNS server for the whole local
+network that answers queries for advertising and tracking domains with a
+blackhole address, so every device behind it is protected without any
+software of its own. It comes with a web interface for its statistics,
+query log, lists and settings, and the pihole command-line tool.
+
+This is the native FreeBSD port, from the FreedomNAS forks that carry the
+FreeBSD support. The DNS engine is in dns/pihole-ftl.

@@ -1,0 +1,18 @@
+[
+{ type: install
+  message: <<EOM
+Pi-hole answers DNS on port 53, so nothing else may listen there (for
+instance local_unbound). Start it and build its blocklist with:
+
+  sysrc pihole_ftl_enable=YES
+  service pihole_ftl start
+  pihole -g
+
+Set the password of the web interface (http://<address>/admin/) with
+`pihole setpassword`. A new installation asks Quad9 (9.9.9.9,
+149.112.112.112); choose other upstream servers in the web interface or
+with `pihole-FTL --config dns.upstreams '["1.1.1.1"]'`. Configuration and databases are in
+%%PREFIX%%/etc/pihole, logs in /var/log/pihole.
+EOM
+}
+]

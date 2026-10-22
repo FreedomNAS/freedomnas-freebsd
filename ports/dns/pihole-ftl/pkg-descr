@@ -1,0 +1,7 @@
+Pi-hole FTL (Faster Than Light) is the engine of the Pi-hole network-wide
+ad blocker: a DNS and DHCP server built on dnsmasq that answers queries for
+blocked domains itself, keeps statistics and a query log in SQLite, and
+serves the Pi-hole API and web interface through its embedded web server.
+
+This is the native FreeBSD build of FTL, from the FreedomNAS fork that
+carries the FreeBSD support.

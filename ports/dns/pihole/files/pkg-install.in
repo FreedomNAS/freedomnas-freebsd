@@ -1,0 +1,26 @@
+#!/bin/sh
+
+case "$2" in
+PRE-INSTALL)
+	if ! pw groupshow pihole >/dev/null 2>&1; then
+		pw groupadd pihole
+	fi
+	if ! pw usershow pihole >/dev/null 2>&1; then
+		pw useradd pihole -g pihole -c "Pi-hole" -d /nonexistent -s /usr/sbin/nologin
+	fi
+	;;
+POST-INSTALL)
+	# Pi-hole's own installer asks for upstream DNS servers; a fresh install
+	# from the package starts with Quad9's
+	if [ ! -f %%PREFIX%%/etc/pihole/pihole.toml ]; then
+		printf '[dns]\n  upstreams = ["9.9.9.9", "149.112.112.112"]\n' \
+			> %%PREFIX%%/etc/pihole/pihole.toml
+	fi
+	# ... and with one blocklist
+	if [ ! -f %%PREFIX%%/etc/pihole/gravity.db ] && [ ! -f %%PREFIX%%/etc/pihole/adlists.list ]; then
+		echo "https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts" \
+			> %%PREFIX%%/etc/pihole/adlists.list
+	fi
+	chown -R pihole:pihole %%PREFIX%%/etc/pihole /var/log/pihole
+	;;
+esac
