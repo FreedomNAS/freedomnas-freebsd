@@ -1,6 +1,8 @@
 name: publish-packages
 
-# Builds the five FreedomNAS packages inside FreeBSD's own VM image
+# Builds the five FreedomNAS packages, and the community modules
+# (freedomnas-module-<id>, from each module's dev branch or its own newest
+# vX.Y.Z tag), inside FreeBSD's own VM image
 # (ci/build-in-vm.sh, through freedomnas-image-builder's QEMU driver) and
 # publishes the signed catalogue to Codeberg's generic registry as
 # freedomnas-freebsd/<major>-<group> (bin/publish-codeberg.sh).
@@ -93,6 +95,23 @@ jobs:
           ref: ${{ env.SRC_REF }}
           path: freedomnas-installer
 
+      - name: Check out the community modules
+        run: |
+          modules=""
+          for repo in freedomnas-containers; do
+            url="https://codeberg.org/FreedomNAS/$repo.git"
+            ref=dev
+            if [ "$GROUP" = main ]; then
+              ref="$(git ls-remote --tags --refs "$url" 'v*' \
+                | sed 's|.*refs/tags/||' | grep -E '^v[0-9]+(\.[0-9]+)*$' | sort -V | tail -n 1)"
+              [ -n "$ref" ] || { echo "$repo has no release tag yet: not built for main"; continue; }
+            fi
+            echo "Building $repo at $ref"
+            git clone --depth 50 --branch "$ref" "$url" "$repo"
+            modules="$modules $repo"
+          done
+          echo "MODULES=$modules" >> "$GITHUB_ENV"
+
       - name: Build in the FreeBSD VM
         env:
           FREEBSD_SIGNING_KEY: ${{ secrets.FREEBSD_SIGNING_KEY }}
@@ -100,7 +119,7 @@ jobs:
           [ -n "$FREEBSD_SIGNING_KEY" ] || { echo "the FREEBSD_SIGNING_KEY secret is not set" >&2; exit 1; }
           key="${RUNNER_TEMP:-/tmp}/freedomnas-freebsd.key"
           ( umask 077 && printf '%s\n' "$FREEBSD_SIGNING_KEY" > "$key" )
-          sudo env SNAPSHOT="$SNAPSHOT" SIGNING_KEY="$key" FREEBSD_RELEASE="$FREEBSD_RELEASE" FNAS_CACHE_DIR=/var/cache/freedomnas-ci/freebsd \
+          sudo env SNAPSHOT="$SNAPSHOT" MODULES="$MODULES" SIGNING_KEY="$key" FREEBSD_RELEASE="$FREEBSD_RELEASE" FNAS_CACHE_DIR=/var/cache/freedomnas-ci/freebsd \
             sh freedomnas-freebsd/ci/build-in-vm.sh "$PWD/out"
           rm -f "$key"
           sudo chown -R "$(id -u):$(id -g)" out

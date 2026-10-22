@@ -6,6 +6,10 @@
 #   bin/build-freedomnas-pkgs.sh freedomnas-webui    # one of them
 #   SNAPSHOT=1 bin/build-freedomnas-pkgs.sh          # ...at 1.0.<stamp>
 #   ABI=FreeBSD:14 bin/build-freedomnas-pkgs.sh      # for another major version
+#   bin/build-freedomnas-pkgs.sh freedomnas-containers   # a community module
+#
+# A community module's repository (freedomnas-<id>) becomes the package
+# freedomnas-module-<id>, the name the WebUI's Plugins page searches for.
 #
 # Nothing here is compiled but the documentation, which mkdocs turns into a
 # static site; the other packages are Python and JSON. Each is a staging
@@ -131,6 +135,16 @@ stage_webui() {
     ln -s ../../profiles/assets/supervisor.sh "$dest/bin/supervisor.sh"
 }
 
+stage_module() {
+    install -d "$1$ROOT/modules" "$1$ROOT/profiles"
+    cp -R "$2/modules/$3" "$1$ROOT/modules/$3"
+    cp -R "$2/profiles/$3" "$1$ROOT/profiles/$3"
+}
+
+stage_containers() {
+    stage_module "$1" "$2" containers
+}
+
 stage_installer() {
     dest="$1$ROOT/installer"
     install -d "$dest/lib" "$1/usr/local/bin"
@@ -144,6 +158,7 @@ for name in $COMPONENTS; do
     [ -d "$src" ] || { echo "build-freedomnas-pkgs.sh: no checkout at $src" >&2; exit 1; }
 
     licenses="MPL20"
+    pkgname="$name"
     case "$name" in
     freedomnas-profiles)
         comment="FreedomNAS OS profiles, the JSON translator layer"
@@ -166,6 +181,11 @@ for name in $COMPONENTS; do
         comment="Profile-driven FreedomNAS installer"
         deps="freedomnas-core freedomnas-profiles python3 cdialog curl"
         ;;
+    freedomnas-containers)
+        pkgname=freedomnas-module-containers
+        comment="FreedomNAS containers: AppJail jails on ZFS datasets, apps and a catalogue"
+        deps="freedomnas-core freedomnas-webui"
+        ;;
     *)
         echo "build-freedomnas-pkgs.sh: unknown component $name" >&2
         exit 1
@@ -178,7 +198,7 @@ for name in $COMPONENTS; do
     "$base") label="$version" ;;
     *) label="$base+${version#"$base".}" ;;
     esac
-    echo "==> $name $version ($ABI, $ROOT)"
+    echo "==> $pkgname $version ($ABI, $ROOT)"
 
     stage="$WORK/$name/stage"
     install -d "$stage"
@@ -189,21 +209,28 @@ for name in $COMPONENTS; do
     python3 -m compileall -q --invalidation-mode checked-hash \
         -s "$stage" -p / "$stage$ROOT" >/dev/null
     if [ -f "$src/README.md" ]; then
-        install -d "$stage/usr/local/share/doc/$name"
-        install -m 644 "$src/README.md" "$stage/usr/local/share/doc/$name/README.md"
+        install -d "$stage/usr/local/share/doc/$pkgname"
+        install -m 644 "$src/README.md" "$stage/usr/local/share/doc/$pkgname/README.md"
     fi
 
-    NAME="$name" VERSION="$version" COMMENT="$comment" ABI="$ABI" MAINTAINER="$MAINTAINER" LICENSES="$licenses" \
+    NAME="$pkgname" REPO="$name" VERSION="$version" COMMENT="$comment" ABI="$ABI" MAINTAINER="$MAINTAINER" LICENSES="$licenses" \
     DEPS="{$(deps_json $deps)}" COMMIT="$(git -C "$src" log -1 --format=%H 2>/dev/null || echo unknown)" \
     README="$src/README.md" python3 - > "$WORK/$name/manifest" <<'EOF'
-import json, os
+import json, os, re
 e = os.environ
 try:
     lines = open(e["README"], encoding="utf-8").read().splitlines()
 except FileNotFoundError:
     lines = []
-desc = next((l.strip() for l in lines
-             if l.strip() and not l.startswith(("#", "!", "[", "<", "`"))), e["COMMENT"])
+para = []
+for l in lines:
+    if para and l.strip():
+        para.append(l.strip())
+    elif para:
+        break
+    elif l.strip() and not l.startswith(("#", "!", "[", "<", "`", "|")):
+        para.append(l.strip())
+desc = re.sub(r"\[([^]]*)\]\([^)]*\)", r"\1", " ".join(para)) or e["COMMENT"]
 print(json.dumps({
     "name": e["NAME"],
     "origin": "sysutils/" + e["NAME"],
@@ -211,7 +238,7 @@ print(json.dumps({
     "comment": e["COMMENT"],
     "desc": desc,
     "maintainer": e["MAINTAINER"],
-    "www": "https://codeberg.org/FreedomNAS/" + e["NAME"],
+    "www": "https://codeberg.org/FreedomNAS/" + e["REPO"],
     "abi": e["ABI"] + ":*",
     "prefix": "/usr/local",
     "licenselogic": "single" if len(e["LICENSES"].split()) == 1 else "and",
@@ -230,9 +257,9 @@ EOF
             | sed 's|^\.|@dir |' | sort -r
     } > "$WORK/$name/plist"
 
-    rm -f "$ALL/$name"-[0-9]*.pkg
+    rm -f "$ALL/$pkgname"-[0-9]*.pkg
     pkg create -M "$WORK/$name/manifest" -p "$WORK/$name/plist" -r "$stage" -o "$ALL"
-    echo "    $ALL/$name-$version.pkg"
+    echo "    $ALL/$pkgname-$version.pkg"
 done
 
 echo "==> Now run bin/make-repo.sh"

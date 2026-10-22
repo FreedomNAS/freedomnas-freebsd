@@ -1,7 +1,7 @@
 # freedomnas-freebsd
 
-A pkg repository for FreedomNAS on FreeBSD: the five FreedomNAS packages,
-built from the checkouts beside this one.
+A pkg repository for FreedomNAS on FreeBSD: the five FreedomNAS packages and
+the community modules, built from the checkouts beside this one.
 
 | Package | Depends on (FreeBSD's own repository) |
 |---------|----------------------------------------|
@@ -10,6 +10,7 @@ built from the checkouts beside this one.
 | `freedomnas-docs` | — (built with `py312-mkdocs-material`) |
 | `freedomnas-webui` | `freedomnas-docs`, `py312-fastapi`, `-uvicorn`, `-websockets`, `-Jinja2`, `-python-pam`, `-pyyaml` |
 | `freedomnas-installer` | `python3`, `cdialog`, `curl` |
+| `freedomnas-module-containers` | `freedomnas-core`, `freedomnas-webui` (AppJail and Director are installed by the module itself, from its profile) |
 
 Everything else FreedomNAS installs on FreeBSD is already in FreeBSD's
 repository, `sysutils/topgrade` included, or in the base system (ZFS,
@@ -27,6 +28,7 @@ bin/build-freedomnas-pkgs.sh                    # all five
 bin/build-freedomnas-pkgs.sh freedomnas-webui   # one of them
 SNAPSHOT=1 bin/build-freedomnas-pkgs.sh         # ...as 1.0.<yyyymmddhhmm>
 ABI=FreeBSD:14 bin/build-freedomnas-pkgs.sh     # for another major version
+bin/build-freedomnas-pkgs.sh freedomnas-containers  # a community module
 bin/make-repo.sh --new-key freedomnas.key       # once: the signing key pair
 SIGNING_KEY=freedomnas.key bin/make-repo.sh     # the signed catalogue
 ```
@@ -78,7 +80,17 @@ https://codeberg.org/api/packages/FreedomNAS/generic/freedomnas-freebsd/<major>-
 | `ref: dev` (also every night) | every component at `dev`, versioned `X.Y.Z.<commit stamp>` | `15-dev` |
 | `ref: main` | the newest release tag, `vX.Y.Z` | `15-main` |
 
-`ci/build-in-vm.sh` does the FreeBSD part from Linux: it boots FreeBSD's own
+Community modules are built in the same run: from their `dev` branch for
+`15-dev`, and from their own newest `vX.Y.Z` tag for `15-main` (a module
+with no tag yet is left out of `15-main`).
+
+A community module's repository, `freedomnas-<id>`, becomes the package
+`freedomnas-module-<id>`, the name the WebUI's Plugins page searches for; its
+version is the module's own (`debian/changelog`), not FreedomNAS's. It
+installs `modules/<id>` and `profiles/<id>` under the same root.
+
+`ci/build-in-vm.sh` does the FreeBSD part from Linux (`MODULES="freedomnas-containers"`
+adds the module checkouts beside this one): it boots FreeBSD's own
 VM image under QEMU with freedomnas-image-builder's driver (that checkout
 must sit beside this one), runs `ci/build-in-guest.sh` there —
 `bin/build-freedomnas-pkgs.sh`, then `pkg repo` with the signing key — and

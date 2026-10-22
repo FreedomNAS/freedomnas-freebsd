@@ -46,6 +46,10 @@ log "=== Packages ==="
 git config --global --add safe.directory '*'
 cd "$WORK/freedomnas-freebsd"
 OUT="$WORK/out" SNAPSHOT="$SNAPSHOT" sh bin/build-freedomnas-pkgs.sh || fail "build-freedomnas-pkgs.sh"
+if [ -n "${MODULES:-}" ]; then
+    # shellcheck disable=SC2086
+    OUT="$WORK/out" SNAPSHOT="$SNAPSHOT" sh bin/build-freedomnas-pkgs.sh $MODULES || fail "build-freedomnas-pkgs.sh $MODULES"
+fi
 
 log "=== Catalogue ==="
 FLAT="$WORK/flat"

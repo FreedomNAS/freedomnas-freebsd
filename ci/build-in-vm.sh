@@ -16,6 +16,8 @@
 #   SNAPSHOT=1           version the packages as <base>.<commit stamp>
 #   SIGNING_KEY=<file>   RSA private key; without it the catalogue is unsigned
 #   FREEBSD_RELEASE      the release whose VM image builds them (15.1-RELEASE)
+#   MODULES              community module checkouts beside this one to build
+#                        too, e.g. "freedomnas-containers"
 set -eu
 
 REPO_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -41,7 +43,7 @@ trap 'rm -rf "$SEED" "$(dirname "$DISK")"' EXIT
 
 echo "=== [1/4] Sources ==="
 mkdir -p "$SEED/src"
-for name in $COMPONENTS; do
+for name in $COMPONENTS ${MODULES:-}; do
     [ -d "$SRC_ROOT/$name/.git" ] || { echo "build-in-vm.sh: no checkout at $SRC_ROOT/$name" >&2; exit 1; }
     git -c safe.directory='*' clone -q --depth 1 "file://$SRC_ROOT/$name" "$SEED/src/$name"
     echo "    $name $(git -C "$SEED/src/$name" log -1 --format='%h %cd' --date=iso-strict)"
@@ -53,7 +55,7 @@ rm -rf "$SEED/src"
 if [ -n "${SIGNING_KEY:-}" ]; then
     cp "$SIGNING_KEY" "$SEED/signing.key"
 fi
-printf 'SNAPSHOT="%s"\n' "${SNAPSHOT:-}" > "$SEED/env.sh"
+printf 'SNAPSHOT="%s"\nMODULES="%s"\n' "${SNAPSHOT:-}" "${MODULES:-}" > "$SEED/env.sh"
 cp "$REPO_DIR/ci/build-in-guest.sh" "$SEED/build-in-guest.sh"
 
 echo "=== [2/4] Scratch disk ==="
