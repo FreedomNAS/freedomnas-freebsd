@@ -11,6 +11,7 @@ the community modules, built from the checkouts beside this one.
 | `freedomnas-webui` | `freedomnas-docs`, `py312-fastapi`, `-uvicorn`, `-websockets`, `-Jinja2`, `-python-pam`, `-pyyaml` |
 | `freedomnas-installer` | `python3`, `cdialog`, `curl` |
 | `freedomnas-module-containers` | `freedomnas-core`, `freedomnas-webui` (AppJail and Director are installed by the module itself, from its profile) |
+| `freedomnas-module-proxy` | `freedomnas-core`, `freedomnas-webui` (Caddy is installed by the module itself, from FreeBSD's repository) |
 
 Everything else FreedomNAS installs on FreeBSD is already in FreeBSD's
 repository, `sysutils/topgrade` included, or in the base system (ZFS,

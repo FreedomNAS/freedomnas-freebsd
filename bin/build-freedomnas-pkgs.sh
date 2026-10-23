@@ -145,6 +145,10 @@ stage_containers() {
     stage_module "$1" "$2" containers
 }
 
+stage_proxy() {
+    stage_module "$1" "$2" proxy
+}
+
 stage_installer() {
     dest="$1$ROOT/installer"
     install -d "$dest/lib" "$1/usr/local/bin"
@@ -184,6 +188,11 @@ for name in $COMPONENTS; do
     freedomnas-containers)
         pkgname=freedomnas-module-containers
         comment="FreedomNAS containers: AppJail jails on ZFS datasets, apps and a catalogue"
+        deps="freedomnas-core freedomnas-webui"
+        ;;
+    freedomnas-proxy)
+        pkgname=freedomnas-module-proxy
+        comment="FreedomNAS reverse proxy: Caddy with HTTPS for every web app"
         deps="freedomnas-core freedomnas-webui"
         ;;
     *)
