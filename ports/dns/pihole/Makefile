@@ -1,6 +1,6 @@
 PORTNAME=	pihole
 DISTVERSION=	6.5
-PORTREVISION=	2
+PORTREVISION=	3
 CATEGORIES=	dns www
 MASTER_SITES=	https://codeberg.org/FreedomNAS/pihole-core-freebsd/archive/:core
 DISTFILES=	${CORE_COMMIT}.tar.gz:core
@@ -26,7 +26,7 @@ NO_BUILD=	yes
 
 SUB_FILES=	pkg-install pkg-message
 
-CORE_COMMIT=	04ffa69b1cca0125ddcbb6b8bae9469f4ed56ed2
+CORE_COMMIT=	be82040c676493c428cdea09eddba3cfe998ec03
 WEB_VERSION=	6.6.1
 
 WRKSRC=		${WRKDIR}/pihole-core-freebsd
