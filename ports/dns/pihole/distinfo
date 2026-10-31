@@ -1,5 +1,5 @@
-TIMESTAMP = 1792748394
-SHA256 (pihole/be82040c676493c428cdea09eddba3cfe998ec03.tar.gz) = 244d98003f1c491a71d53ec798d83994d36b30d78aa4da375e1f736638e182f1
-SIZE (pihole/be82040c676493c428cdea09eddba3cfe998ec03.tar.gz) = 124858
+TIMESTAMP = 1793451040
 SHA256 (pihole/pi-hole-web-v6.6.1_GH0.tar.gz) = 34d82b58a0b601803769e66c0f3e1d8bd06513449625e38e07afa007399284d9
 SIZE (pihole/pi-hole-web-v6.6.1_GH0.tar.gz) = 2187334
+SHA256 (pihole/pi-hole-pi-hole-v6.5_GH0.tar.gz) = 277a1115b3b3b3ee0c115a6496710539709eefcd34fb5015480cd0bf2785b3f7
+SIZE (pihole/pi-hole-pi-hole-v6.5_GH0.tar.gz) = 122473

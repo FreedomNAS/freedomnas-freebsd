@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sarahmeow1986 <saretta1986@proton.me>
+Date: Thu, 22 Oct 2026 06:11:12 +0200
+Subject: [PATCH] Keep the PID file in /var/run on FreeBSD and drop a needless
+ warning
+
+---
+ src/capabilities.c  | 11 +++++++++--
+ src/config/config.h |  5 +++++
+ 2 files changed, 14 insertions(+), 2 deletions(-)
+
+diff --git src/capabilities.c src/capabilities.c
+index 87b739ed..087e792f 100644
+--- src/capabilities.c
++++ src/capabilities.c
+@@ -416,8 +416,15 @@ bool check_capabilities(void)
+ 		log_warn("Not running as root, needed for setting the system time from the NTP client");
+ 		capabilities_okay = false;
+ 	}
+-	log_warn("Not running as root, needed for taking ownership of the files FTL creates");
+-	return false && capabilities_okay;
++	// Files FTL creates belong to the user it runs as. Only another user
++	// than pihole would need root to hand them over
++	const struct passwd *pw = getpwnam("pihole");
++	if(pw == NULL || pw->pw_uid != geteuid())
++	{
++		log_warn("Not running as root, needed for taking ownership of the files FTL creates");
++		capabilities_okay = false;
++	}
++	return capabilities_okay;
+ }
+ 
+ #endif // __linux__
+diff --git src/config/config.h src/config/config.h
+index d113e419..66ccc527 100644
+--- src/config/config.h
++++ src/config/config.h
+@@ -11,7 +11,12 @@
+ #define CONFIG_H
+ 
+ // Hardcoded PID path — see GHSA-6w8x-p785-6pm4
++#ifdef __linux__
+ #define FTL_PID_FILE "/run/pihole-FTL.pid"
++#else
++// /var/run is where BSD keeps PID files; /run does not exist there
++#define FTL_PID_FILE "/var/run/pihole-FTL.pid"
++#endif
+ 
+ // enum privacy_level
+ #include "enums.h"

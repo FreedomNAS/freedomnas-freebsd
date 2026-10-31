@@ -1,0 +1,51 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sarahmeow1986 <saretta1986@proton.me>
+Date: Fri, 23 Oct 2026 11:07:29 +0200
+Subject: [PATCH] Refresh the versions file when the FreeBSD service starts and
+ skip git where it is missing
+
+---
+ advanced/Scripts/updatecheck.sh   | 2 ++
+ advanced/Templates/pihole-FTL.rcd | 9 +++++++++
+ 2 files changed, 11 insertions(+)
+
+diff --git advanced/Scripts/updatecheck.sh advanced/Scripts/updatecheck.sh
+index c0215a63..c5fbf05f 100755
+--- advanced/Scripts/updatecheck.sh
++++ advanced/Scripts/updatecheck.sh
+@@ -67,6 +67,8 @@ function get_remote_version() {
+ }
+ 
+ function get_remote_hash() {
++    # A system package does not depend on git
++    command -v git >/dev/null 2>&1 || { echo "null"; return; }
+     git ls-remote "https://github.com/pi-hole/${1}" --tags "${2}" | awk '{print substr($0, 1,8);}' || echo "null"
+ }
+ 
+diff --git advanced/Templates/pihole-FTL.rcd advanced/Templates/pihole-FTL.rcd
+index 0e9afe0c..2d018784 100644
+--- advanced/Templates/pihole-FTL.rcd
++++ advanced/Templates/pihole-FTL.rcd
+@@ -36,6 +36,7 @@ procname="${command}"
+ pidfile="/var/run/pihole-FTL.pid"
+ extra_commands="reload"
+ start_precmd="${name}_prestart"
++start_postcmd="${name}_poststart"
+ stop_postcmd="${name}_poststop"
+ 
+ pihole_ftl_prestart()
+@@ -46,6 +47,14 @@ pihole_ftl_prestart()
+ 	fi
+ }
+ 
++# The versions file the web interface and `pihole -v` read: a package
++# install or upgrade ends with a (re)start, which is when it changes
++pihole_ftl_poststart()
++{
++	PATH="${PATH}:/usr/local/sbin:/usr/local/bin" /usr/local/bin/pihole updatechecker \
++		</dev/null >/dev/null 2>&1 &
++}
++
+ pihole_ftl_poststop()
+ {
+ 	sh "${PI_HOLE_SCRIPT_DIR}/pihole-FTL-poststop.sh"

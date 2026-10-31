@@ -1,0 +1,588 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sarahmeow1986 <saretta1986@proton.me>
+Date: Thu, 22 Oct 2026 06:15:44 +0200
+Subject: [PATCH] Take the installation directories from the build, with
+ FreeBSD's layout
+
+---
+ src/CMakeLists.txt          | 22 +++++++++++++++++++++-
+ src/api/info.c              |  3 ++-
+ src/args.c                  | 11 ++++++-----
+ src/config/config.c         | 27 ++++++++++++++-------------
+ src/config/config.h         |  9 +++++----
+ src/config/dnsmasq_config.c | 11 ++++++-----
+ src/config/dnsmasq_config.h | 11 ++++++-----
+ src/config/inotify.c        |  3 ++-
+ src/config/legacy_reader.c  |  3 ++-
+ src/config/password.c       |  3 ++-
+ src/dnsmasq/CMakeLists.txt  |  2 +-
+ src/dnsmasq_interface.c     |  3 ++-
+ src/files.c                 |  7 ++++---
+ src/files.h                 |  3 ++-
+ src/paths.h                 | 36 ++++++++++++++++++++++++++++++++++++
+ src/zip/teleporter.c        |  7 ++++---
+ 16 files changed, 115 insertions(+), 46 deletions(-)
+ create mode 100644 src/paths.h
+
+diff --git src/CMakeLists.txt src/CMakeLists.txt
+index d9f4ef41..51304954 100644
+--- src/CMakeLists.txt
++++ src/CMakeLists.txt
+@@ -199,6 +199,26 @@ if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     link_directories(/usr/local/lib)
+ endif()
+ 
++# Installation directories (src/paths.h), following the platform's layout
++if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++    set(PIHOLE_CONFDIR_DEFAULT "/usr/local/etc/pihole")
++    set(PIHOLE_WEBROOT_DEFAULT "/usr/local/www/pihole")
++    set(DNSMASQ_D_DIR_DEFAULT "/usr/local/etc/dnsmasq.d")
++else()
++    set(PIHOLE_CONFDIR_DEFAULT "/etc/pihole")
++    set(PIHOLE_WEBROOT_DEFAULT "/var/www/html")
++    set(DNSMASQ_D_DIR_DEFAULT "/etc/dnsmasq.d")
++endif()
++set(PIHOLE_CONFDIR "${PIHOLE_CONFDIR_DEFAULT}" CACHE STRING "Configuration and database directory")
++set(PIHOLE_LOGDIR "/var/log/pihole" CACHE STRING "Log directory")
++set(PIHOLE_WEBROOT "${PIHOLE_WEBROOT_DEFAULT}" CACHE STRING "Document root of the web interface")
++set(DNSMASQ_D_DIR "${DNSMASQ_D_DIR_DEFAULT}" CACHE STRING "Additional dnsmasq configuration directory")
++add_compile_definitions(
++    PIHOLE_CONFDIR="${PIHOLE_CONFDIR}"
++    PIHOLE_LOGDIR="${PIHOLE_LOGDIR}"
++    PIHOLE_WEBROOT="${PIHOLE_WEBROOT}"
++    DNSMASQ_D_DIR="${DNSMASQ_D_DIR}")
++
+ # Do we want to compile a statically linked executable?
+ if(DEFINED ENV{STATIC})
+     if($ENV{STATIC} STREQUAL "true")
+@@ -470,7 +490,7 @@ if(BUILD_TXT_STAT_REGRESSION)
+             ${PROJECT_SOURCE_DIR}/src/dnsmasq)
+     target_compile_definitions(txt_stat_regression PRIVATE
+             VERSION=\"${DNSMASQ_VERSION}\"
+-            CONFFILE=\"/etc/pihole/dnsmasq.conf\"
++            CONFFILE=\"${PIHOLE_CONFDIR}/dnsmasq.conf\"
+             HAVE_POLL_H)
+ 
+     # Optional ASan/UBSan instrumentation for local runs:
+diff --git src/api/info.c src/api/info.c
+index 641ddb5b..93d520dc 100644
+--- src/api/info.c
++++ src/api/info.c
+@@ -9,6 +9,7 @@
+ *  Please see LICENSE file for your rights under this license. */
+ 
+ #include "FTL.h"
++#include "paths.h"
+ #include "webserver/http-common.h"
+ #include "webserver/json_macros.h"
+ #include "api/api.h"
+@@ -58,7 +59,7 @@
+ // timer_elapsed_msec()
+ #include "timers.h"
+ 
+-#define VERSIONS_FILE "/etc/pihole/versions"
++#define VERSIONS_FILE PIHOLE_CONFDIR "/versions"
+ 
+ int api_info_client(struct ftl_conn *api)
+ {
+diff --git src/args.c src/args.c
+index 12e507be..e3d9665f 100644
+--- src/args.c
++++ src/args.c
+@@ -11,6 +11,7 @@
+ // DNSMASQ COPYRIGHT
+ #define FTLDNS
+ #include "dnsmasq/dnsmasq.h"
++#include "paths.h"
+ #undef __USE_XOPEN
+ 
+ #include <nettle/bignum.h>
+@@ -493,9 +494,9 @@ void parse_args(int argc, char *argv[])
+ 		if(argc < 3 || argc > 5)
+ 		{
+ 			printf("Usage: %s --gen-x509 <output file> [<domain>] [rsa]\n", argv[0]);
+-			printf("Example:          %s --gen-x509 /etc/pihole/tls.pem\n", argv[0]);
+-			printf(" with domain:     %s --gen-x509 /etc/pihole/tls.pem pi.hole\n", argv[0]);
+-			printf(" RSA with domain: %s --gen-x509 /etc/pihole/tls.pem nanopi.lan rsa\n", argv[0]);
++			printf("Example:          %s --gen-x509 " PIHOLE_CONFDIR "/tls.pem\n", argv[0]);
++			printf(" with domain:     %s --gen-x509 " PIHOLE_CONFDIR "/tls.pem pi.hole\n", argv[0]);
++			printf(" RSA with domain: %s --gen-x509 " PIHOLE_CONFDIR "/tls.pem nanopi.lan rsa\n", argv[0]);
+ 			exit(EXIT_FAILURE);
+ 		}
+ 		// Read config
+@@ -524,8 +525,8 @@ void parse_args(int argc, char *argv[])
+ 		if(argc > 4)
+ 		{
+ 			printf("Usage: %s %s [<input file>] [<domain>]\n", argv[0], argv[1]);
+-			printf("Example: %s %s /etc/pihole/tls.pem\n", argv[0], argv[1]);
+-			printf(" with domain: %s %s /etc/pihole/tls.pem pi.hole\n", argv[0], argv[1]);
++			printf("Example: %s %s " PIHOLE_CONFDIR "/tls.pem\n", argv[0], argv[1]);
++			printf(" with domain: %s %s " PIHOLE_CONFDIR "/tls.pem pi.hole\n", argv[0], argv[1]);
+ 			exit(EXIT_FAILURE);
+ 		}
+ 
+diff --git src/config/config.c src/config/config.c
+index 86eeb5a5..1940a0f1 100644
+--- src/config/config.c
++++ src/config/config.c
+@@ -9,6 +9,7 @@
+ *  Please see LICENSE file for your rights under this license. */
+ 
+ #include "FTL.h"
++#include "paths.h"
+ #include "config/config.h"
+ #include "config/toml_reader.h"
+ #include "config/toml_writer.h"
+@@ -785,7 +786,7 @@ void initConfig(struct config *conf)
+ 
+ 	// sub-struct dns.rate_limit
+ 	conf->dns.rateLimit.count.k = "dns.rateLimit.count";
+-	conf->dns.rateLimit.count.h = "Rate-limited queries are answered with a REFUSED reply and not further processed by FTL.\n\n The default settings for FTL's rate-limiting are to permit no more than 1000 queries in 60 seconds. Both numbers can be customized independently. It is important to note that rate-limiting is happening on a per-client basis. Other clients can continue to use FTL while rate-limited clients are short-circuited at the same time.\n\n For this setting, both numbers, the maximum number of queries within a given time, and the length of the time interval (seconds) have to be specified. For instance, if you want to set a rate limit of 1 query per hour, the option should look like dns.rateLimit.count=1 and dns.rateLimit.interval=3600. The time interval is relative to when FTL has finished starting (start of the daemon + possible delay by DELAY_STARTUP) then it will advance in steps of the rate-limiting interval. If a client reaches the maximum number of queries it will be blocked until the end of the current interval. This will be logged to /var/log/pihole/FTL.log, e.g. Rate-limiting 10.0.1.39 for at least 44 seconds. If the client continues to send queries while being blocked already and this number of queries during the blocking exceeds the limit the client will continue to be blocked until the end of the next interval (FTL.log will contain lines like Still rate-limiting 10.0.1.39 as it made additional 5007 queries). As soon as the client requests less than the set limit, it will be unblocked (Ending rate-limitation of 10.0.1.39).\n\n Rate-limiting may be disabled altogether by setting both values to zero (this results in the same behavior as before FTL v5.7).\n\n How many queries are permitted...";
++	conf->dns.rateLimit.count.h = "Rate-limited queries are answered with a REFUSED reply and not further processed by FTL.\n\n The default settings for FTL's rate-limiting are to permit no more than 1000 queries in 60 seconds. Both numbers can be customized independently. It is important to note that rate-limiting is happening on a per-client basis. Other clients can continue to use FTL while rate-limited clients are short-circuited at the same time.\n\n For this setting, both numbers, the maximum number of queries within a given time, and the length of the time interval (seconds) have to be specified. For instance, if you want to set a rate limit of 1 query per hour, the option should look like dns.rateLimit.count=1 and dns.rateLimit.interval=3600. The time interval is relative to when FTL has finished starting (start of the daemon + possible delay by DELAY_STARTUP) then it will advance in steps of the rate-limiting interval. If a client reaches the maximum number of queries it will be blocked until the end of the current interval. This will be logged to " PIHOLE_LOGDIR "/FTL.log, e.g. Rate-limiting 10.0.1.39 for at least 44 seconds. If the client continues to send queries while being blocked already and this number of queries during the blocking exceeds the limit the client will continue to be blocked until the end of the next interval (FTL.log will contain lines like Still rate-limiting 10.0.1.39 as it made additional 5007 queries). As soon as the client requests less than the set limit, it will be unblocked (Ending rate-limitation of 10.0.1.39).\n\n Rate-limiting may be disabled altogether by setting both values to zero (this results in the same behavior as before FTL v5.7).\n\n How many queries are permitted...";
+ 	conf->dns.rateLimit.count.a = cJSON_CreateStringReference("A positive integer value");
+ 	conf->dns.rateLimit.count.t = CONF_UINT;
+ 	conf->dns.rateLimit.count.d.ui = 1000;
+@@ -1164,7 +1165,7 @@ void initConfig(struct config *conf)
+ 	conf->webserver.tls.cert.a = cJSON_CreateStringReference("A valid TLS certificate file (*.pem)");
+ 	conf->webserver.tls.cert.f = FLAG_RESTART_FTL;
+ 	conf->webserver.tls.cert.t = CONF_STRING;
+-	conf->webserver.tls.cert.d.s = (char*)"/etc/pihole/tls.pem";
++	conf->webserver.tls.cert.d.s = (char*)PIHOLE_CONFDIR "/tls.pem";
+ 	conf->webserver.tls.cert.c = validate_filepath_empty;
+ 
+ 	// sub-struct paths
+@@ -1173,7 +1174,7 @@ void initConfig(struct config *conf)
+ 	conf->webserver.paths.webroot.a = cJSON_CreateStringReference("A valid absolute path not containing \""CONFIG_DIR"\"");
+ 	conf->webserver.paths.webroot.t = CONF_STRING;
+ 	conf->webserver.paths.webroot.f = FLAG_RESTART_FTL | FLAG_API_READ_ONLY;
+-	conf->webserver.paths.webroot.d.s = (char*)"/var/www/html";
++	conf->webserver.paths.webroot.d.s = (char*)PIHOLE_WEBROOT;
+ 	conf->webserver.paths.webroot.c = validate_webroot;
+ 
+ 	conf->webserver.paths.webhome.k = "webserver.paths.webhome";
+@@ -1268,7 +1269,7 @@ void initConfig(struct config *conf)
+ 	conf->webserver.api.app_sudo.c = validate_stub; // Only type-based checking
+ 
+ 	conf->webserver.api.cli_pw.k = "webserver.api.cli_pw";
+-	conf->webserver.api.cli_pw.h = "Should FTL create a temporary CLI password?\n\n This password is stored in clear in /etc/pihole and can be used by the CLI (pihole ...  commands) to authenticate against the API. Note that the password is only valid for the current session and regenerated on each FTL restart. Sessions initiated with this password cannot modify the Pi-hole configuration (change passwords, etc.) for security reasons but can still use the API to query data and manage lists.";
++	conf->webserver.api.cli_pw.h = "Should FTL create a temporary CLI password?\n\n This password is stored in clear in " PIHOLE_CONFDIR " and can be used by the CLI (pihole ...  commands) to authenticate against the API. Note that the password is only valid for the current session and regenerated on each FTL restart. Sessions initiated with this password cannot modify the Pi-hole configuration (change passwords, etc.) for security reasons but can still use the API to query data and manage lists.";
+ 	conf->webserver.api.cli_pw.t = CONF_BOOL;
+ 	conf->webserver.api.cli_pw.f = FLAG_RESTART_FTL;
+ 	conf->webserver.api.cli_pw.d.b = true;
+@@ -1345,7 +1346,7 @@ void initConfig(struct config *conf)
+ 	conf->files.database.a = cJSON_CreateStringReference("Any FTL database");
+ 	conf->files.database.t = CONF_STRING;
+ 	conf->files.database.f = FLAG_RESTART_FTL;
+-	conf->files.database.d.s = (char*)"/etc/pihole/pihole-FTL.db";
++	conf->files.database.d.s = (char*)PIHOLE_CONFDIR "/pihole-FTL.db";
+ 	conf->files.database.c = validate_filepath;
+ 
+ 	conf->files.tmp_db.k = "files.tmp_db";
+@@ -1353,7 +1354,7 @@ void initConfig(struct config *conf)
+ 	conf->files.tmp_db.a = cJSON_CreateStringReference("Any FTL database");
+ 	conf->files.tmp_db.t = CONF_STRING;
+ 	conf->files.tmp_db.f = FLAG_RESTART_FTL;
+-	conf->files.tmp_db.d.s = (char*)"/etc/pihole/pihole-tmp.db";
++	conf->files.tmp_db.d.s = (char*)PIHOLE_CONFDIR "/pihole-tmp.db";
+ 	conf->files.tmp_db.c = validate_filepath;
+ 
+ 	conf->files.gravity.k = "files.gravity";
+@@ -1361,7 +1362,7 @@ void initConfig(struct config *conf)
+ 	conf->files.gravity.a = cJSON_CreateStringReference("Any Pi-hole gravity database");
+ 	conf->files.gravity.t = CONF_STRING;
+ 	conf->files.gravity.f = FLAG_RESTART_FTL;
+-	conf->files.gravity.d.s = (char*)"/etc/pihole/gravity.db";
++	conf->files.gravity.d.s = (char*)PIHOLE_CONFDIR "/gravity.db";
+ 	conf->files.gravity.c = validate_filepath;
+ 
+ 	conf->files.gravity_tmp.k = "files.gravity_tmp";
+@@ -1376,7 +1377,7 @@ void initConfig(struct config *conf)
+ 	conf->files.macvendor.h = "The database containing MAC -> Vendor information for the network table";
+ 	conf->files.macvendor.a = cJSON_CreateStringReference("Any Pi-hole macvendor database");
+ 	conf->files.macvendor.t = CONF_STRING;
+-	conf->files.macvendor.d.s = (char*)"/etc/pihole/macvendor.db";
++	conf->files.macvendor.d.s = (char*)PIHOLE_CONFDIR "/macvendor.db";
+ 	conf->files.macvendor.c = validate_filepath;
+ 
+ 	conf->files.pcap.k = "files.pcap";
+@@ -1395,7 +1396,7 @@ void initConfig(struct config *conf)
+ 	conf->files.log.dnsmasq.a = cJSON_CreateStringReference("Any writable file");
+ 	conf->files.log.dnsmasq.t = CONF_STRING;
+ 	conf->files.log.dnsmasq.f = FLAG_RESTART_FTL;
+-	conf->files.log.dnsmasq.d.s = (char*)"/var/log/pihole/pihole.log";
++	conf->files.log.dnsmasq.d.s = (char*)PIHOLE_LOGDIR "/pihole.log";
+ 	conf->files.log.dnsmasq.c = validate_filepath_dash;
+ 
+ 	conf->files.log.webserver.k = "files.log.webserver";
+@@ -1403,7 +1404,7 @@ void initConfig(struct config *conf)
+ 	conf->files.log.webserver.a = cJSON_CreateStringReference("Any writable file");
+ 	conf->files.log.webserver.t = CONF_STRING;
+ 	conf->files.log.webserver.f = FLAG_RESTART_FTL;
+-	conf->files.log.webserver.d.s = (char*)"/var/log/pihole/webserver.log";
++	conf->files.log.webserver.d.s = (char*)PIHOLE_LOGDIR "/webserver.log";
+ 	conf->files.log.webserver.c = validate_filepath;
+ 
+ 	// struct misc
+@@ -1445,7 +1446,7 @@ void initConfig(struct config *conf)
+ 	conf->misc.addr2line.c = validate_stub; // Only type-based checking
+ 
+ 	conf->misc.etc_dnsmasq_d.k = "misc.etc_dnsmasq_d";
+-	conf->misc.etc_dnsmasq_d.h = "Should FTL load additional dnsmasq configuration files from /etc/dnsmasq.d/?\n\n Warning: This is an advanced setting and should only be used with care.\n Incorrectly formatted or config files specifying options which can only be defined once can result in conflicts with the automatic configuration of Pi-hole (see "DNSMASQ_PH_CONFIG") and may stop DNS resolution from working.";
++	conf->misc.etc_dnsmasq_d.h = "Should FTL load additional dnsmasq configuration files from " DNSMASQ_D_DIR "/?\n\n Warning: This is an advanced setting and should only be used with care.\n Incorrectly formatted or config files specifying options which can only be defined once can result in conflicts with the automatic configuration of Pi-hole (see "DNSMASQ_PH_CONFIG") and may stop DNS resolution from working.";
+ 	conf->misc.etc_dnsmasq_d.t = CONF_BOOL;
+ 	conf->misc.etc_dnsmasq_d.f = FLAG_RESTART_FTL;
+ 	conf->misc.etc_dnsmasq_d.d.b = false;
+@@ -1653,7 +1654,7 @@ void initConfig(struct config *conf)
+ 	conf->debug.config.c = validate_stub; // Only type-based checking
+ 
+ 	conf->debug.inotify.k = "debug.inotify";
+-	conf->debug.inotify.h = "Debug monitoring of /etc/pihole filesystem events";
++	conf->debug.inotify.h = "Debug monitoring of " PIHOLE_CONFDIR " filesystem events";
+ 	conf->debug.inotify.t = CONF_BOOL;
+ 	conf->debug.inotify.d.b = false;
+ 	conf->debug.inotify.c = validate_stub; // Only type-based checking
+@@ -2115,7 +2116,7 @@ bool getLogFilePath(bool try_read)
+ 	config.files.log.ftl.h = "The location of FTL's log file";
+ 	config.files.log.ftl.a = cJSON_CreateStringReference("any writable file");
+ 	config.files.log.ftl.t = CONF_STRING;
+-	config.files.log.ftl.d.s = (char*)"/var/log/pihole/FTL.log";
++	config.files.log.ftl.d.s = (char*)PIHOLE_LOGDIR "/FTL.log";
+ 	config.files.log.ftl.v.s = config.files.log.ftl.d.s;
+ 	config.files.log.ftl.c = validate_filepath;
+ 	config.files.log.ftl.f = FLAG_FTL_LOG;
+diff --git src/config/config.h src/config/config.h
+index 66ccc527..fc5da719 100644
+--- src/config/config.h
++++ src/config/config.h
+@@ -20,6 +20,7 @@
+ 
+ // enum privacy_level
+ #include "enums.h"
++#include "paths.h"
+ #include <stdbool.h>
+ // typedef int16_t
+ #include <sys/types.h>
+@@ -36,7 +37,7 @@
+ // enum web_theme
+ #include "api/theme.h"
+ 
+-#define CONFIG_DIR "/etc/pihole"
++#define CONFIG_DIR PIHOLE_CONFDIR
+ #define GLOBALTOMLPATH CONFIG_DIR"/pihole.toml"
+ 
+ // This static string represents an unchanged password
+@@ -46,13 +47,13 @@
+ #define VALIDATOR_ERRBUF_LEN 256
+ 
+ // Location of the legacy (pre-v6.0) config file
+-#define GLOBALCONFFILE_LEGACY "/etc/pihole/pihole-FTL.conf"
++#define GLOBALCONFFILE_LEGACY PIHOLE_CONFDIR "/pihole-FTL.conf"
+ 
+ // Migration target for the legacy (pre-v6.0) config file
+-#define MIGRATION_TARGET_V6 "/etc/pihole/migration_backup_v6"
++#define MIGRATION_TARGET_V6 PIHOLE_CONFDIR "/migration_backup_v6"
+ 
+ // Location of the legacy (pre-v6.0) setupVars config file
+-#define SETUPVARS_CONF "/etc/pihole/setupVars.conf"
++#define SETUPVARS_CONF PIHOLE_CONFDIR "/setupVars.conf"
+ 
+ union conf_value {
+ 	bool b;                                     // boolean value
+diff --git src/config/dnsmasq_config.c src/config/dnsmasq_config.c
+index a45b483f..92118c5b 100644
+--- src/config/dnsmasq_config.c
++++ src/config/dnsmasq_config.c
+@@ -9,6 +9,7 @@
+ *  Please see LICENSE file for your rights under this license. */
+ 
+ #include "FTL.h"
++#include "paths.h"
+ #include "dnsmasq_config.h"
+ // logging routines
+ #include "log.h"
+@@ -262,12 +263,12 @@ static void write_config_header(FILE *fp, const char *description)
+ 	CONFIG_CENTER(fp, HEADER_WIDTH, "%s", "ANY CHANGES MADE TO THIS FILE WILL BE LOST WHEN THE CONFIGURATION CHANGES");
+ 	CONFIG_CENTER(fp, HEADER_WIDTH, "%s", "");
+ 	CONFIG_CENTER(fp, HEADER_WIDTH, "%s", "IF YOU WISH TO CHANGE ANY OF THESE VALUES, CHANGE THEM IN");
+-	CONFIG_CENTER(fp, HEADER_WIDTH, "%s", "/etc/pihole/pihole.toml");
++	CONFIG_CENTER(fp, HEADER_WIDTH, "%s", PIHOLE_CONFDIR "/pihole.toml");
+ 	CONFIG_CENTER(fp, HEADER_WIDTH, "%s", "and restart pihole-FTL");
+ 	CONFIG_CENTER(fp, HEADER_WIDTH, "%s", "");
+ 	CONFIG_CENTER(fp, HEADER_WIDTH, "%s", "ANY OTHER CHANGES SHOULD BE MADE IN A SEPARATE CONFIG FILE");
+-	CONFIG_CENTER(fp, HEADER_WIDTH, "%s", "WITHIN /etc/dnsmasq.d/yourname.conf");
+-	CONFIG_CENTER(fp, HEADER_WIDTH, "%s", "(make sure misc.etc_dnsmasq_d is set to true in /etc/pihole/pihole.toml)");
++	CONFIG_CENTER(fp, HEADER_WIDTH, "%s", "WITHIN " DNSMASQ_D_DIR "/yourname.conf");
++	CONFIG_CENTER(fp, HEADER_WIDTH, "%s", "(make sure misc.etc_dnsmasq_d is set to true in " PIHOLE_CONFDIR "/pihole.toml)");
+ 	CONFIG_CENTER(fp, HEADER_WIDTH, "%s", "");
+ 	CONFIG_CENTER(fp, HEADER_WIDTH, "Last updated: %s", timestring);
+ 	CONFIG_CENTER(fp, HEADER_WIDTH, "by FTL version %s", get_FTL_version());
+@@ -889,13 +890,13 @@ bool __attribute__((nonnull(1,3))) write_dnsmasq_config(struct config *conf, enu
+ 	fputs("server=/onion/\n", pihole_conf);
+ 	fputs("\n", pihole_conf);
+ 
+-	if(directory_exists("/etc/dnsmasq.d") && conf->misc.etc_dnsmasq_d.v.b)
++	if(directory_exists(DNSMASQ_D_DIR) && conf->misc.etc_dnsmasq_d.v.b)
+ 	{
+ 		// Load additional user configs from /etc/dnsmasq.d if the
+ 		// directory exists (it may not, e.g., in a container)
+ 		// Load only files ending in .conf
+ 		fputs("# Load additional user configs\n", pihole_conf);
+-		fputs("conf-dir=/etc/dnsmasq.d,*.conf\n", pihole_conf);
++		fputs("conf-dir=" DNSMASQ_D_DIR ",*.conf\n", pihole_conf);
+ 		fputs("\n", pihole_conf);
+ 	}
+ 
+diff --git src/config/dnsmasq_config.h src/config/dnsmasq_config.h
+index 0e04e9f9..1079036c 100644
+--- src/config/dnsmasq_config.h
++++ src/config/dnsmasq_config.h
+@@ -11,6 +11,7 @@
+ #define DNSMASQ_CONFIG_H
+ 
+ #include "config/config.h"
++#include "paths.h"
+ 
+ #define ERRBUF_SIZE 1024
+ 
+@@ -29,14 +30,14 @@ bool read_legacy_cnames_config(void);
+ bool read_legacy_custom_hosts_config(void);
+ bool write_custom_list(void);
+ 
+-#define DNSMASQ_PH_CONFIG "/etc/pihole/dnsmasq.conf"
+-#define DNSMASQ_TEMP_CONF "/etc/pihole/dnsmasq.conf.temp"
++#define DNSMASQ_PH_CONFIG PIHOLE_CONFDIR "/dnsmasq.conf"
++#define DNSMASQ_TEMP_CONF PIHOLE_CONFDIR "/dnsmasq.conf.temp"
+ #define DNSMASQ_STATIC_LEASES MIGRATION_TARGET_V6"/04-pihole-static-dhcp.conf"
+ #define DNSMASQ_CNAMES MIGRATION_TARGET_V6"/05-pihole-custom-cname.conf"
+-#define DNSMASQ_HOSTSDIR "/etc/pihole/hosts"
++#define DNSMASQ_HOSTSDIR PIHOLE_CONFDIR "/hosts"
+ #define DNSMASQ_CUSTOM_LIST DNSMASQ_HOSTSDIR"/custom.list"
+-#define DNSMASQ_CUSTOM_LIST_LEGACY "/etc/pihole/custom.list"
++#define DNSMASQ_CUSTOM_LIST_LEGACY PIHOLE_CONFDIR "/custom.list"
+ #define DNSMASQ_CUSTOM_LIST_LEGACY_TARGET MIGRATION_TARGET_V6"/custom.list"
+-#define DHCPLEASESFILE "/etc/pihole/dhcp.leases"
++#define DHCPLEASESFILE PIHOLE_CONFDIR "/dhcp.leases"
+ 
+ #endif //DNSMASQ_CONFIG_H
+diff --git src/config/inotify.c src/config/inotify.c
+index f3c69c41..d6fbcf2c 100644
+--- src/config/inotify.c
++++ src/config/inotify.c
+@@ -9,6 +9,7 @@
+ *  Please see LICENSE file for your rights under this license. */
+ 
+ #include "config/inotify.h"
++#include "paths.h"
+ #include "FTL.h"
+ #include "log.h"
+ #include <sys/inotify.h>
+@@ -24,7 +25,7 @@
+ // free()
+ #include <stdlib.h>
+ 
+-#define WATCHDIR "/etc/pihole"
++#define WATCHDIR PIHOLE_CONFDIR
+ 
+ static int inotify_fd = -1;
+ static int inotify_wd = -1;
+diff --git src/config/legacy_reader.c src/config/legacy_reader.c
+index ef5823b0..e456d200 100644
+--- src/config/legacy_reader.c
++++ src/config/legacy_reader.c
+@@ -9,6 +9,7 @@
+ *  Please see LICENSE file for your rights under this license. */
+ 
+ #include "FTL.h"
++#include "paths.h"
+ #include "legacy_reader.h"
+ #include "config.h"
+ #include "config/setupVars.h"
+@@ -74,7 +75,7 @@ bool getLogFilePathLegacy(struct config *conf, FILE *fp)
+ 			free(conf->files.log.ftl.v.s);
+ 
+ 		// Use standard path if no custom path was obtained from the config file
+-		conf->files.log.ftl.v.s = strdup("/var/log/pihole/FTL.log");
++		conf->files.log.ftl.v.s = strdup(PIHOLE_LOGDIR "/FTL.log");
+ 		conf->files.log.ftl.t = CONF_STRING_ALLOCATED;
+ 
+ 		// Test if memory allocation was successful
+diff --git src/config/password.c src/config/password.c
+index 363d71b4..662b5c65 100644
+--- src/config/password.c
++++ src/config/password.c
+@@ -9,6 +9,7 @@
+ *  Please see LICENSE file for your rights under this license. */
+ 
+ #include "FTL.h"
++#include "paths.h"
+ // open(), O_NOFOLLOW
+ #include <fcntl.h>
+ #include "log.h"
+@@ -52,7 +53,7 @@
+ // sufficient access to the memory (ptrace, swapfile) would also have access to
+ // the password file. Leaking the password after exit is not a concern as a new
+ // password is generated on every start.
+-#define CLI_PW_FILE "/etc/pihole/cli_pw"
++#define CLI_PW_FILE PIHOLE_CONFDIR "/cli_pw"
+ static char *cli_password = NULL;
+ 
+ // Convert RAW data into hex representation
+diff --git src/dnsmasq/CMakeLists.txt src/dnsmasq/CMakeLists.txt
+index 81e8ac50..a05c3e6f 100644
+--- src/dnsmasq/CMakeLists.txt
++++ src/dnsmasq/CMakeLists.txt
+@@ -63,7 +63,7 @@ set(sources
+ 
+ add_library(dnsmasq OBJECT ${sources})
+ target_compile_definitions(dnsmasq PRIVATE VERSION=\"${DNSMASQ_VERSION}\")
+-target_compile_definitions(dnsmasq PRIVATE CONFFILE=\"/etc/pihole/dnsmasq.conf\")
++target_compile_definitions(dnsmasq PRIVATE CONFFILE=\"${PIHOLE_CONFDIR}/dnsmasq.conf\")
+ if (CMAKE_C_COMPILER_ID STREQUAL "GNU")
+     target_compile_options(dnsmasq PRIVATE -Wno-maybe-uninitialized -Wno-sign-compare)
+ elseif (CMAKE_C_COMPILER_ID STREQUAL "Clang")
+diff --git src/dnsmasq_interface.c src/dnsmasq_interface.c
+index 0d6a1407..753c6765 100644
+--- src/dnsmasq_interface.c
++++ src/dnsmasq_interface.c
+@@ -10,6 +10,7 @@
+ 
+ #define FTLDNS
+ #include "dnsmasq/dnsmasq.h"
++#include "paths.h"
+ #undef __USE_XOPEN
+ #include "FTL.h"
+ #include "enums.h"
+@@ -3755,7 +3756,7 @@ static void chown_pihole_own_dir(const char *path, struct passwd *pwd)
+ 	if(in_pihole_dir(path))
+ 		chown_pihole(path, pwd);
+ 	else
+-		log_warn("Not changing ownership of %s, it is outside of /etc/pihole and /var/log/pihole", path);
++		log_warn("Not changing ownership of %s, it is outside of " PIHOLE_CONFDIR " and " PIHOLE_LOGDIR, path);
+ }
+ 
+ void FTL_fork_and_bind_sockets(struct passwd *ent_pw, bool dnsmasq_start)
+diff --git src/files.c src/files.c
+index 6e6ede29..f7efec30 100644
+--- src/files.c
++++ src/files.c
+@@ -9,6 +9,7 @@
+ *  Please see LICENSE file for your rights under this license. */
+ 
+ #include "FTL.h"
++#include "paths.h"
+ #include "files.h"
+ #include "compat/selfexe.h"
+ #include "config/config.h"
+@@ -55,8 +56,8 @@ bool in_pihole_dir(const char *path)
+ 		return false;
+ 
+ 	const size_t dirlen = slash - path;
+-	return (dirlen == strlen("/etc/pihole") && strncmp(path, "/etc/pihole", dirlen) == 0) ||
+-	       (dirlen == strlen("/var/log/pihole") && strncmp(path, "/var/log/pihole", dirlen) == 0);
++	return (dirlen == strlen(PIHOLE_CONFDIR) && strncmp(path, PIHOLE_CONFDIR, dirlen) == 0) ||
++	       (dirlen == strlen(PIHOLE_LOGDIR) && strncmp(path, PIHOLE_LOGDIR, dirlen) == 0);
+ }
+ 
+ // chmod_file() changes the file mode bits of a given regular file according
+@@ -66,7 +67,7 @@ bool chmod_file(const char *filename, const mode_t mode)
+ {
+ 	if(geteuid() == 0 && !in_pihole_dir(filename))
+ 	{
+-		log_warn("Not changing mode of %s, it is outside of /etc/pihole and /var/log/pihole", filename);
++		log_warn("Not changing mode of %s, it is outside of " PIHOLE_CONFDIR " and " PIHOLE_LOGDIR, filename);
+ 		return false;
+ 	}
+ 
+diff --git src/files.h src/files.h
+index 2a4f7ac3..7dacd84d 100644
+--- src/files.h
++++ src/files.h
+@@ -11,6 +11,7 @@
+ #define FILE_H
+ 
+ #include <stdbool.h>
++#include "paths.h"
+ #include <sys/stat.h>
+ // setmntent()
+ #include "compat/mntent.h"
+@@ -20,7 +21,7 @@
+ #include <pwd.h>
+ 
+ #define MAX_ROTATIONS 15
+-#define BACKUP_DIR "/etc/pihole/config_backups"
++#define BACKUP_DIR PIHOLE_CONFDIR "/config_backups"
+ 
+ bool in_pihole_dir(const char *path);
+ bool chmod_file(const char *filename, const mode_t mode);
+diff --git src/paths.h src/paths.h
+new file mode 100644
+index 00000000..b37a6ebd
+--- /dev/null
++++ src/paths.h
+@@ -0,0 +1,36 @@
++/* Pi-hole: A black hole for Internet advertisements
++*  (c) 2026 Pi-hole, LLC (https://pi-hole.net)
++*  Network-wide ad blocking via your own hardware.
++*
++*  FTL Engine
++*  Installation directories
++*
++*  This file is copyright under the latest version of the EUPL.
++*  Please see LICENSE file for your rights under this license. */
++#ifndef PATHS_H
++#define PATHS_H
++
++// The build sets these (src/CMakeLists.txt) from the platform's file system
++// layout; the fallbacks are the Linux one
++
++// Configuration, databases and the files FTL writes beside them
++#ifndef PIHOLE_CONFDIR
++#define PIHOLE_CONFDIR "/etc/pihole"
++#endif
++
++// Log files
++#ifndef PIHOLE_LOGDIR
++#define PIHOLE_LOGDIR "/var/log/pihole"
++#endif
++
++// Document root of the web interface
++#ifndef PIHOLE_WEBROOT
++#define PIHOLE_WEBROOT "/var/www/html"
++#endif
++
++// Additional dnsmasq configuration (misc.etc_dnsmasq_d)
++#ifndef DNSMASQ_D_DIR
++#define DNSMASQ_D_DIR "/etc/dnsmasq.d"
++#endif
++
++#endif // PATHS_H
+diff --git src/zip/teleporter.c src/zip/teleporter.c
+index fbff08e8..d14ca775 100644
+--- src/zip/teleporter.c
++++ src/zip/teleporter.c
+@@ -9,6 +9,7 @@
+ *  Please see LICENSE file for your rights under this license. */
+ 
+ #include "FTL.h"
++#include "paths.h"
+ // isalnum(), isdigit()
+ #include <ctype.h>
+ // inet_pton()
+@@ -199,14 +200,14 @@ const char *generate_teleporter_zip(mz_zip_archive *zip, char filename[128], voi
+ 
+ 	// Add /etc/pihole/dhcp.lease to the ZIP archive if it exists
+ 	file_comment = "DHCP leases file";
+-	file_path = "/etc/pihole/dhcp.leases";
++	file_path = PIHOLE_CONFDIR "/dhcp.leases";
+ 	if(file_exists(file_path) && !mz_zip_writer_add_file(zip, file_path+1, file_path, file_comment, (uint16_t)strlen(file_comment), MZ_BEST_COMPRESSION))
+ 	{
+ 		mz_zip_writer_end(zip);
+-		return "Failed to add /etc/pihole/dhcp.leases to heap ZIP archive!";
++		return "Failed to add " PIHOLE_CONFDIR "/dhcp.leases to heap ZIP archive!";
+ 	}
+ 
+-	const char *directory = "/etc/dnsmasq.d";
++	const char *directory = DNSMASQ_D_DIR;
+ 	if(directory_exists(directory))
+ 	{
+ 		// Loop over all files and add them to the ZIP archive

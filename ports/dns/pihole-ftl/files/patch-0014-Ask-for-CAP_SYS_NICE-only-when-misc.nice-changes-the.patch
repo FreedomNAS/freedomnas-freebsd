@@ -1,0 +1,31 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sarahmeow1986 <saretta1986@proton.me>
+Date: Thu, 22 Oct 2026 12:45:55 +0200
+Subject: [PATCH] Ask for CAP_SYS_NICE only when misc.nice changes the priority
+
+---
+ src/capabilities.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git src/capabilities.c src/capabilities.c
+index ed7f4a58..d6e07aba 100644
+--- src/capabilities.c
++++ src/capabilities.c
+@@ -344,7 +344,7 @@ bool check_capabilities(void)
+ 	                                      binds_privileged_port(),
+ 	                                      "binding a privileged port");
+ 	capabilities_okay &= warn_missing_cap(data, CAP_SYS_NICE, "CAP_SYS_NICE",
+-	                                      config.misc.nice.v.i < 0,
++	                                      config.misc.nice.v.i < 0 && config.misc.nice.v.i != -999,
+ 	                                      "raising the process priority set in misc.nice");
+ 	capabilities_okay &= warn_missing_cap(data, CAP_SYS_TIME, "CAP_SYS_TIME",
+ 	                                      config.ntp.sync.active.v.b,
+@@ -464,7 +464,7 @@ bool check_capabilities(void)
+ 	                                            binds_privileged_port(),
+ 	                                            "binding a privileged port");
+ 	capabilities_okay &= warn_missing_privilege(CAP_SYS_NICE, "CAP_SYS_NICE",
+-	                                            config.misc.nice.v.i < 0,
++	                                            config.misc.nice.v.i < 0 && config.misc.nice.v.i != -999,
+ 	                                            "raising the process priority set in misc.nice");
+ 	capabilities_okay &= warn_missing_privilege(CAP_SYS_TIME, "CAP_SYS_TIME",
+ 	                                            config.ntp.sync.active.v.b,

@@ -1,0 +1,22 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sarahmeow1986 <saretta1986@proton.me>
+Date: Thu, 22 Oct 2026 06:21:46 +0200
+Subject: [PATCH] Spell out gravity's configuration directory
+
+---
+ gravity.sh | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git gravity.sh gravity.sh
+index e9ea9ce5..4bda6156 100755
+--- gravity.sh
++++ gravity.sh
+@@ -39,7 +39,7 @@ coltable="${PI_HOLE_SCRIPT_DIR}/COL_TABLE"
+ basename="pihole"
+ PIHOLE_COMMAND="/usr/local/bin/${basename}"
+ 
+-piholeDir="/etc/${basename}"
++piholeDir="/etc/pihole"
+ 
+ # Legacy (pre v5.0) list file locations
+ whitelistFile="${piholeDir}/whitelist.txt"

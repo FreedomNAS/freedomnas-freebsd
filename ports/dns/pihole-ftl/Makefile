@@ -1,14 +1,13 @@
 PORTNAME=	pihole-ftl
 DISTVERSION=	6.8
-PORTREVISION=	2
+DISTVERSIONPREFIX=	v
+PORTREVISION=	3
 CATEGORIES=	dns
-MASTER_SITES=	https://codeberg.org/FreedomNAS/pihole-ftl-freebsd/archive/
-DISTNAME=	${FTL_COMMIT}
 DIST_SUBDIR=	${PORTNAME}
 
 MAINTAINER=	dev@freedomnas.io
 COMMENT=	Pi-hole FTL, the DNS and DHCP engine with its API and web server
-WWW=		https://codeberg.org/FreedomNAS/pihole-ftl-freebsd
+WWW=		https://github.com/pi-hole/FTL
 
 LICENSE=	EUPL12
 
@@ -20,16 +19,20 @@ LIB_DEPENDS=	libgmp.so:math/gmp \
 		libunistring.so:devel/libunistring
 
 USES=		cmake pkgconfig readline
+USE_GITHUB=	yes
+GH_ACCOUNT=	pi-hole
+GH_PROJECT=	FTL
 
-FTL_COMMIT=	46a4fa0d39b4f8e693124c33b24dc66c85afc96b
-
-WRKSRC=		${WRKDIR}/pihole-ftl-freebsd
+# Upstream's release with FreedomNAS's FreeBSD changes on top, one patch per
+# change in files/ (bin/update-pihole.sh moves them to a new release)
+FTL_HASH=	29c8b13f
+FTL_DATE=	2026-10-17
 
 # A tarball carries no git metadata, so the version comes from here; it is
 # read while building (src/gen_version.cmake), not only when configuring
-FTL_ENV=	GIT_BRANCH=freebsd GIT_HASH=${FTL_COMMIT:C/^(.{8}).*/\1/} \
+FTL_ENV=	GIT_BRANCH=master GIT_HASH=${FTL_HASH} \
 		GIT_VERSION=v${DISTVERSION} GIT_TAG=v${DISTVERSION} \
-		GIT_DATE=2026-10-22 STATIC=false
+		GIT_DATE=${FTL_DATE} STATIC=false
 CONFIGURE_ENV=	${FTL_ENV}
 MAKE_ENV=	${FTL_ENV}
 CMAKE_ARGS=	-DCMAKE_DISABLE_FIND_PACKAGE_DBus=ON

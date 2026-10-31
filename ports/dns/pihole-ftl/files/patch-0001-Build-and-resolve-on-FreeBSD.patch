@@ -1,0 +1,1627 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sarahmeow1986 <saretta1986@proton.me>
+Date: Thu, 22 Oct 2026 05:53:45 +0200
+Subject: [PATCH] Build and resolve on FreeBSD
+
+---
+ src/CMakeLists.txt          |   9 ++
+ src/FTL.h                   |  11 ++
+ src/api/info.c              |   9 +-
+ src/api/network.c           |   4 +
+ src/capabilities.c          |  66 ++++++++++
+ src/capabilities.h          |  12 ++
+ src/compat/gettid.c         |  21 ++++
+ src/compat/mntent.h         |  26 ++++
+ src/compat/prctl.h          |  44 +++++++
+ src/compat/selfexe.h        |  34 ++++++
+ src/compat/sysinfo.c        |  86 +++++++++++++
+ src/compat/sysinfo.h        |  39 ++++++
+ src/config/env.c            |   2 +
+ src/config/inotify.c        |   2 +-
+ src/daemon.c                |   9 +-
+ src/dnsmasq/util.c          |   5 +-
+ src/dnsmasq_interface.c     |   7 +-
+ src/files.c                 |  24 +++-
+ src/files.h                 |   2 +-
+ src/gc.c                    |   2 +-
+ src/ntp/client.c            |  10 ++
+ src/ntp/rtc.c               |  10 ++
+ src/ntp/server.c            |   7 +-
+ src/shmem.c                 |  10 ++
+ src/signals.c               |  11 +-
+ src/syscalls/ftlallocate.c  |  12 ++
+ src/tools/arp-scan.c        |  16 +++
+ src/tools/dhcp-discover.c   |  14 +++
+ src/tools/dhcpv6-discover.c |  15 +++
+ src/tools/netlink.c         |  12 ++
+ src/tools/netlink.h         |  18 +++
+ src/tools/netlink_consts.h  | 232 ++++++++++++++++++++++++++++++++++++
+ src/webserver/webserver.c   |   2 +-
+ 33 files changed, 769 insertions(+), 14 deletions(-)
+ create mode 100644 src/compat/gettid.c
+ create mode 100644 src/compat/mntent.h
+ create mode 100644 src/compat/prctl.h
+ create mode 100644 src/compat/selfexe.h
+ create mode 100644 src/compat/sysinfo.c
+ create mode 100644 src/compat/sysinfo.h
+
+diff --git src/CMakeLists.txt src/CMakeLists.txt
+index 1a9ad2ef..d9f4ef41 100644
+--- src/CMakeLists.txt
++++ src/CMakeLists.txt
+@@ -193,6 +193,12 @@ separate_arguments(EXTRAWARN)
+ 
+ # -Wxor-used-as-pow
+ 
++# FreeBSD installs third-party headers and libraries under /usr/local
++if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
++    include_directories(SYSTEM /usr/local/include)
++    link_directories(/usr/local/lib)
++endif()
++
+ # Do we want to compile a statically linked executable?
+ if(DEFINED ENV{STATIC})
+     if($ENV{STATIC} STREQUAL "true")
+@@ -228,6 +234,9 @@ set(sources
+         args.h
+         capabilities.c
+         capabilities.h
++        compat/gettid.c
++        compat/sysinfo.c
++        compat/sysinfo.h
+         daemon.c
+         daemon.h
+         datastructure.c
+diff --git src/FTL.h src/FTL.h
+index 82e003f5..7d45e4a2 100644
+--- src/FTL.h
++++ src/FTL.h
+@@ -55,7 +55,11 @@
+ #include <netdb.h>
+ #include <errno.h>
+ #include <pthread.h>
++#ifdef __linux__
+ #include <sys/prctl.h>
++#else
++#include "compat/prctl.h"
++#endif
+ #include <pwd.h>
+ // syslog
+ #include <syslog.h>
+@@ -67,7 +71,14 @@
+ #include <assert.h>
+ 
+ // Define MIN and MAX macros, use them only when x and y are of the same type
++#ifndef MAX
+ #define MAX(x,y) (((x) > (y)) ? (x) : (y))
++#endif
++
++// Linux-only errno value, never returned elsewhere
++#ifndef ENOKEY
++#define ENOKEY 126
++#endif
+ // MIN(x,y) is already defined in dnsmasq.h
+ 
+ // Number of elements in an array
+diff --git src/api/info.c src/api/info.c
+index 61e567e4..641ddb5b 100644
+--- src/api/info.c
++++ src/api/info.c
+@@ -13,7 +13,7 @@
+ #include "webserver/json_macros.h"
+ #include "api/api.h"
+ // sysinfo(), get_nprocs_conf()
+-#include <sys/sysinfo.h>
++#include "compat/sysinfo.h"
+ // get_blockingstatus()
+ #include "config/setupVars.h"
+ // counters
+@@ -522,7 +522,14 @@ static int get_host_obj(struct ftl_conn *api, cJSON *host)
+ 	cJSON *uname_ = JSON_NEW_OBJECT();
+ 	struct utsname un = { 0 };
+ 	uname(&un);
++#ifdef __linux__
+ 	JSON_COPY_STR_TO_OBJECT(uname_, "domainname", un.domainname);
++#else
++	char domainname[256] = { 0 };
++	if(getdomainname(domainname, sizeof(domainname) - 1) != 0)
++		domainname[0] = '\0';
++	JSON_COPY_STR_TO_OBJECT(uname_, "domainname", domainname);
++#endif
+ 	JSON_COPY_STR_TO_OBJECT(uname_, "machine", un.machine);
+ 	JSON_COPY_STR_TO_OBJECT(uname_, "nodename", un.nodename);
+ 	JSON_COPY_STR_TO_OBJECT(uname_, "release", un.release);
+diff --git src/api/network.c src/api/network.c
+index f9408da4..a65bbbbd 100644
+--- src/api/network.c
++++ src/api/network.c
+@@ -26,9 +26,13 @@
+ #include "config/config.h"
+ // PRIx64
+ #include <inttypes.h>
++#ifdef __linux__
+ #include <linux/rtnetlink.h>
++#endif
++#ifdef __linux__
+ // IFA_LINK and friends
+ #include <linux/if_addr.h>
++#endif
+ // nlroutes(), nladdrs(), nllinks()
+ #include "tools/netlink.h"
+ 
+diff --git src/capabilities.c src/capabilities.c
+index a335ab28..87b739ed 100644
+--- src/capabilities.c
++++ src/capabilities.c
+@@ -16,6 +16,7 @@
+ #include "capabilities.h"
+ #include "config/config.h"
+ #include "log.h"
++#ifdef __linux__
+ // prctl(), PR_CAP_AMBIENT
+ #include <sys/prctl.h>
+ 
+@@ -233,6 +234,8 @@ bool check_capability(const unsigned int cap)
+ 	return available;
+ }
+ 
++#endif // __linux__
++
+ /**
+  * @brief Checks the required Linux capabilities for the application.
+  *
+@@ -288,6 +291,7 @@ static bool binds_privileged_port(void)
+ 	return privileged;
+ }
+ 
++#ifdef __linux__
+ // Warn when a capability this configuration needs is missing. Returns false
+ // only in that case: a capability the running configuration does not use is
+ // not reported at all
+@@ -355,3 +359,65 @@ bool check_capabilities(void)
+ 	// Return whether capabilities are all okay
+ 	return capabilities_okay;
+ }
++
++#else // !__linux__
++
++// Without per-process capabilities everything FTL asks for comes with root,
++// and nothing can be set aside or handed on: these only report whether FTL
++// runs as root
++bool suspend_capability(const unsigned int cap)
++{
++	(void)cap;
++	return true;
++}
++
++bool restore_capability_for_exec(const unsigned int cap)
++{
++	(void)cap;
++	return geteuid() == 0;
++}
++
++bool use_capability(const unsigned int cap, const bool enable)
++{
++	(void)cap;
++	(void)enable;
++	return geteuid() == 0;
++}
++
++bool check_capability(const unsigned int cap)
++{
++	(void)cap;
++	return geteuid() == 0;
++}
++
++bool check_capabilities(void)
++{
++	if(geteuid() == 0)
++		return true;
++
++	bool capabilities_okay = true;
++	if(config.dhcp.active.v.b)
++	{
++		log_warn("Not running as root, needed for ARP injection while acting as the DHCP server");
++		capabilities_okay = false;
++	}
++	if(binds_privileged_port())
++	{
++		log_warn("Not running as root, needed for binding a privileged port");
++		capabilities_okay = false;
++	}
++	if(config.misc.nice.v.i < 0)
++	{
++		log_warn("Not running as root, needed for raising the process priority set in misc.nice");
++		capabilities_okay = false;
++	}
++	if(config.ntp.sync.active.v.b)
++	{
++		log_warn("Not running as root, needed for setting the system time from the NTP client");
++		capabilities_okay = false;
++	}
++	log_warn("Not running as root, needed for taking ownership of the files FTL creates");
++	return false && capabilities_okay;
++}
++
++#endif // __linux__
+diff --git src/capabilities.h src/capabilities.h
+index 31d518e0..6ac28936 100644
+--- src/capabilities.h
++++ src/capabilities.h
+@@ -11,7 +11,19 @@
+ #define CAPABILITIES_H
+ 
+ #include <stdbool.h>
++#ifdef __linux__
+ #include <linux/capability.h>
++#else
++// No per-process capabilities: the numbers only name what FTL asks for, and
++// holding one means running as root
++#define CAP_CHOWN            0
++#define CAP_NET_BIND_SERVICE 10
++#define CAP_NET_ADMIN        12
++#define CAP_NET_RAW          13
++#define CAP_IPC_LOCK         14
++#define CAP_SYS_NICE         23
++#define CAP_SYS_TIME         25
++#endif
+ 
+ bool check_capability(const unsigned int cap);
+ bool check_capabilities(void);
+diff --git src/compat/gettid.c src/compat/gettid.c
+new file mode 100644
+index 00000000..0ae0f7d9
+--- /dev/null
++++ src/compat/gettid.c
+@@ -0,0 +1,21 @@
++/* Pi-hole: A black hole for Internet advertisements
++*  (c) 2026 Pi-hole, LLC (https://pi-hole.net)
++*  Network-wide ad blocking via your own hardware.
++*
++*  FTL Engine
++*  gettid() where libc declares it but does not provide it
++*
++*  This file is copyright under the latest version of the EUPL.
++*  Please see LICENSE file for your rights under this license. */
++
++#if defined(__FreeBSD__)
++#include <sys/types.h>
++#include <pthread.h>
++#include <pthread_np.h>
++#include <unistd.h>
++
++pid_t gettid(void)
++{
++	return (pid_t)pthread_getthreadid_np();
++}
++#endif
+diff --git src/compat/mntent.h src/compat/mntent.h
+new file mode 100644
+index 00000000..71b9fe61
+--- /dev/null
++++ src/compat/mntent.h
+@@ -0,0 +1,26 @@
++/* Pi-hole: A black hole for Internet advertisements
++*  (c) 2026 Pi-hole, LLC (https://pi-hole.net)
++*  Network-wide ad blocking via your own hardware.
++*
++*  FTL Engine
++*  struct mntent on systems without <mntent.h>
++*
++*  This file is copyright under the latest version of the EUPL.
++*  Please see LICENSE file for your rights under this license. */
++#ifndef COMPAT_MNTENT_H
++#define COMPAT_MNTENT_H
++
++#ifdef __linux__
++#include <mntent.h>
++#else
++struct mntent {
++	char *mnt_fsname;
++	char *mnt_dir;
++	char *mnt_type;
++	char *mnt_opts;
++	int mnt_freq;
++	int mnt_passno;
++};
++#endif
++
++#endif // COMPAT_MNTENT_H
+diff --git src/compat/prctl.h src/compat/prctl.h
+new file mode 100644
+index 00000000..bfef5d01
+--- /dev/null
++++ src/compat/prctl.h
+@@ -0,0 +1,44 @@
++/* Pi-hole: A black hole for Internet advertisements
++*  (c) 2026 Pi-hole, LLC (https://pi-hole.net)
++*  Network-wide ad blocking via your own hardware.
++*
++*  FTL Engine
++*  prctl() thread naming on systems without <sys/prctl.h>
++*
++*  This file is copyright under the latest version of the EUPL.
++*  Please see LICENSE file for your rights under this license. */
++#ifndef COMPAT_PRCTL_H
++#define COMPAT_PRCTL_H
++
++#include <pthread.h>
++#include <stdarg.h>
++#include <errno.h>
++#ifdef __FreeBSD__
++#include <pthread_np.h>
++#endif
++
++#define PR_SET_NAME 15
++#define PR_GET_NAME 16
++
++// Only the two thread-naming options FTL uses; the Linux name length (16
++// bytes including the terminator) is what callers expect from PR_GET_NAME
++static inline int prctl(int option, ...)
++{
++	va_list ap;
++	va_start(ap, option);
++	char *name = va_arg(ap, char *);
++	va_end(ap);
++
++	switch(option)
++	{
++		case PR_SET_NAME:
++			return pthread_setname_np(pthread_self(), name) == 0 ? 0 : -1;
++		case PR_GET_NAME:
++			return pthread_getname_np(pthread_self(), name, 16) == 0 ? 0 : -1;
++		default:
++			errno = EINVAL;
++			return -1;
++	}
++}
++
++#endif // COMPAT_PRCTL_H
+diff --git src/compat/selfexe.h src/compat/selfexe.h
+new file mode 100644
+index 00000000..aff765b6
+--- /dev/null
++++ src/compat/selfexe.h
+@@ -0,0 +1,34 @@
++/* Pi-hole: A black hole for Internet advertisements
++*  (c) 2026 Pi-hole, LLC (https://pi-hole.net)
++*  Network-wide ad blocking via your own hardware.
++*
++*  FTL Engine
++*  Path of the running executable, like readlink("/proc/self/exe")
++*
++*  This file is copyright under the latest version of the EUPL.
++*  Please see LICENSE file for your rights under this license. */
++#ifndef COMPAT_SELFEXE_H
++#define COMPAT_SELFEXE_H
++
++#include <sys/types.h>
++#include <unistd.h>
++#ifdef __FreeBSD__
++#include <sys/sysctl.h>
++#endif
++
++// Same contract as readlink(): no terminating NUL, -1 and errno on failure
++static inline ssize_t self_exe(char *buf, const size_t size)
++{
++#ifdef __FreeBSD__
++	int mib[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PATHNAME, -1 };
++	size_t len = size;
++	if(sysctl(mib, 4, buf, &len, NULL, 0) != 0)
++		return -1;
++	// sysctl counts the terminating NUL
++	return len > 0 ? (ssize_t)len - 1 : 0;
++#else
++	return readlink("/proc/self/exe", buf, size);
++#endif
++}
++
++#endif // COMPAT_SELFEXE_H
+diff --git src/compat/sysinfo.c src/compat/sysinfo.c
+new file mode 100644
+index 00000000..ec75174b
+--- /dev/null
++++ src/compat/sysinfo.c
+@@ -0,0 +1,86 @@
++/* Pi-hole: A black hole for Internet advertisements
++*  (c) 2026 Pi-hole, LLC (https://pi-hole.net)
++*  Network-wide ad blocking via your own hardware.
++*
++*  FTL Engine
++*  Linux sysinfo() from sysctl(3)
++*
++*  This file is copyright under the latest version of the EUPL.
++*  Please see LICENSE file for your rights under this license. */
++#include "compat/sysinfo.h"
++
++#ifndef __linux__
++#include <sys/types.h>
++#include <sys/sysctl.h>
++#include <sys/time.h>
++#include <string.h>
++#include <time.h>
++#include <unistd.h>
++#include <sys/user.h>
++#include <vm/vm_param.h>
++
++int sysinfo(struct sysinfo *info)
++{
++	memset(info, 0, sizeof(*info));
++	info->mem_unit = 1;
++
++	struct timeval boottime;
++	size_t len = sizeof(boottime);
++	if(sysctlbyname("kern.boottime", &boottime, &len, NULL, 0) != 0)
++		return -1;
++	struct timespec now;
++	clock_gettime(CLOCK_REALTIME, &now);
++	info->uptime = now.tv_sec - boottime.tv_sec;
++
++	struct loadavg la;
++	len = sizeof(la);
++	if(sysctlbyname("vm.loadavg", &la, &len, NULL, 0) == 0 && la.fscale > 0)
++		for(unsigned int i = 0; i < 3; i++)
++			info->loads[i] = (unsigned long)(((double)la.ldavg[i] / la.fscale) * (1 << SI_LOAD_SHIFT));
++
++	unsigned long physmem = 0;
++	len = sizeof(physmem);
++	if(sysctlbyname("hw.physmem", &physmem, &len, NULL, 0) == 0)
++		info->totalram = physmem;
++	unsigned int free_pages = 0;
++	len = sizeof(free_pages);
++	if(sysctlbyname("vm.stats.vm.v_free_count", &free_pages, &len, NULL, 0) == 0)
++		info->freeram = (unsigned long)free_pages * (unsigned long)getpagesize();
++
++	// vm.swap_info.N holds one struct xswdev per swap device
++	int mib[3];
++	size_t miblen = 2;
++	if(sysctlnametomib("vm.swap_info", mib, &miblen) == 0)
++	{
++		for(int n = 0; ; n++)
++		{
++			struct xswdev xsw;
++			len = sizeof(xsw);
++			mib[2] = n;
++			if(sysctl(mib, 3, &xsw, &len, NULL, 0) != 0)
++				break;
++			info->totalswap += (unsigned long)xsw.xsw_nblks * getpagesize();
++			info->freeswap += (unsigned long)(xsw.xsw_nblks - xsw.xsw_used) * getpagesize();
++		}
++	}
++
++	int procs = 0;
++	len = 0;
++	int pmib[3] = { CTL_KERN, KERN_PROC, KERN_PROC_PROC };
++	if(sysctl(pmib, 3, NULL, &len, NULL, 0) == 0)
++		procs = (int)(len / sizeof(struct kinfo_proc));
++	info->procs = (unsigned short)procs;
++
++	return 0;
++}
++
++int get_nprocs_conf(void)
++{
++	return (int)sysconf(_SC_NPROCESSORS_CONF);
++}
++
++int get_nprocs(void)
++{
++	return (int)sysconf(_SC_NPROCESSORS_ONLN);
++}
++#endif // __linux__
+diff --git src/compat/sysinfo.h src/compat/sysinfo.h
+new file mode 100644
+index 00000000..b97c2497
+--- /dev/null
++++ src/compat/sysinfo.h
+@@ -0,0 +1,39 @@
++/* Pi-hole: A black hole for Internet advertisements
++*  (c) 2026 Pi-hole, LLC (https://pi-hole.net)
++*  Network-wide ad blocking via your own hardware.
++*
++*  FTL Engine
++*  Linux sysinfo() on systems without <sys/sysinfo.h>
++*
++*  This file is copyright under the latest version of the EUPL.
++*  Please see LICENSE file for your rights under this license. */
++#ifndef COMPAT_SYSINFO_H
++#define COMPAT_SYSINFO_H
++
++#ifdef __linux__
++#include <sys/sysinfo.h>
++#else
++
++#define SI_LOAD_SHIFT 16
++
++// The fields of Linux's struct sysinfo FTL reads, in the same units:
++// seconds, loads scaled by 1 << SI_LOAD_SHIFT, memory in mem_unit bytes
++struct sysinfo {
++	long uptime;
++	unsigned long loads[3];
++	unsigned long totalram;
++	unsigned long freeram;
++	unsigned long sharedram;
++	unsigned long bufferram;
++	unsigned long totalswap;
++	unsigned long freeswap;
++	unsigned short procs;
++	unsigned int mem_unit;
++};
++
++int sysinfo(struct sysinfo *info);
++int get_nprocs_conf(void);
++int get_nprocs(void);
++
++#endif // __linux__
++#endif // COMPAT_SYSINFO_H
+diff --git src/config/env.c src/config/env.c
+index d5640adc..699300f1 100644
+--- src/config/env.c
++++ src/config/env.c
+@@ -38,6 +38,8 @@ struct env_item
+ 
+ static struct env_item *env_list = NULL;
+ 
++extern char **environ;
++
+ void getEnvVars(void)
+ {
+ 	// Read environment variables only once
+diff --git src/config/inotify.c src/config/inotify.c
+index ccb60c92..f3c69c41 100644
+--- src/config/inotify.c
++++ src/config/inotify.c
+@@ -13,7 +13,7 @@
+ #include "log.h"
+ #include <sys/inotify.h>
+ // NAME_MAX
+-#include <linux/limits.h>
++#include <limits.h>
+ // FILE
+ #include <stdio.h>
+ // sleepms()
+diff --git src/daemon.c src/daemon.c
+index d98e477d..61e4193a 100644
+--- src/daemon.c
++++ src/daemon.c
+@@ -25,7 +25,7 @@
+ // forked
+ #include "main.h"
+ // sysinfo()
+-#include <sys/sysinfo.h>
++#include "compat/sysinfo.h"
+ #include <errno.h>
+ // getprio(), setprio()
+ #include <sys/resource.h>
+@@ -243,10 +243,15 @@ const char *hostname(void)
+ 		{
+ 			strncpy(nodename, buf.nodename, HOSTNAMESIZE);
+ 
++#ifdef __linux__
+ 			// Only set domain name if node name is not empty: the
+ 			// kernel replies with '(none)' in this case.
+ 			if(!(buf.domainname[0] == '(' && strncmp(buf.domainname, "(none)", 6) == 0))
+ 				strncpy(dname, buf.domainname, HOSTNAMESIZE);
++#else
++			if(getdomainname(dname, HOSTNAMESIZE) != 0)
++				dname[0] = '\0';
++#endif
+ 		}
+ 		nodename[HOSTNAMESIZE - 1] = '\0';
+ 		dname[HOSTNAMESIZE - 1] = '\0';
+@@ -307,6 +312,8 @@ pid_t FTL_gettid(void)
+ {
+ #ifdef SYS_gettid
+ 	return (pid_t)syscall(SYS_gettid);
++#elif defined(__FreeBSD__)
++	return (pid_t)pthread_getthreadid_np();
+ #else
+ #warning SYS_gettid is not available on this system
+ 	return -1;
+diff --git src/dnsmasq/util.c src/dnsmasq/util.c
+index 3e4a7fe8..5835fc8d 100644
+--- src/dnsmasq/util.c
++++ src/dnsmasq/util.c
+@@ -896,7 +896,10 @@ void close_fds(long max_fd, int spare1, int spare2, int spare3)
+   /* fallback, dumb code. */
+   for (max_fd--; max_fd >= 0; max_fd--)
+     if (max_fd != STDOUT_FILENO && max_fd != STDERR_FILENO && max_fd != STDIN_FILENO &&
+-	max_fd != spare1 && max_fd != spare2 && max_fd != spare3)
++	max_fd != spare1 && max_fd != spare2 && max_fd != spare3 &&
++	/****** Pi-hole modification ******/
++	!is_shm_fd(max_fd))
++	/**********************************/
+       close(max_fd);
+ }
+ 
+diff --git src/dnsmasq_interface.c src/dnsmasq_interface.c
+index fd01a6bd..0d6a1407 100644
+--- src/dnsmasq_interface.c
++++ src/dnsmasq_interface.c
+@@ -1161,7 +1161,12 @@ bool _FTL_new_query(const unsigned int flags, const char *name,
+ 	// (e.g., when retrying a query using TCP after UDP truncation). ECS
+ 	// clients usually have no neighbor entry here, and a lookup that found
+ 	// nothing (hwlen 0) is repeated after MAC_LOOKUP_RETRY seconds at most
+-	if(!internal_query && !ecs_client && client->hwlen < 1 && daemon->netlinkfd > 0 &&
++	if(!internal_query && !ecs_client && client->hwlen < 1 &&
++#if defined(HAVE_LINUX_NETWORK)
++	   daemon->netlinkfd > 0 &&
++#elif defined(HAVE_BSD_NETWORK)
++	   daemon->routefd > 0 &&
++#endif
+ 	   (client->hwlen != 0 ||
+ 	    ABS_TO_SHM_TIME((time_t)querytimestamp) - client->lastMACLookup >= MAC_LOOKUP_RETRY))
+ 	{
+diff --git src/files.c src/files.c
+index 49c90de0..6e6ede29 100644
+--- src/files.c
++++ src/files.c
+@@ -10,6 +10,7 @@
+ 
+ #include "FTL.h"
+ #include "files.h"
++#include "compat/selfexe.h"
+ #include "config/config.h"
+ #include "config/setupVars.h"
+ #include "log.h"
+@@ -30,7 +31,9 @@
+ #include <libgen.h>
+ // sendfile()
+ #include <fcntl.h>
++#ifdef __linux__
+ #include <sys/sendfile.h>
++#endif
+ // PRIu64
+ #include <inttypes.h>
+ //basename()
+@@ -331,6 +334,22 @@ unsigned int get_path_usage(const char *path, char buffer[64])
+ }
+ 
+ // Get the filesystem where the given path is located
++#ifndef __linux__
++#include <sys/param.h>
++#include <sys/mount.h>
++struct mntent *get_filesystem_details(const char *path)
++{
++	static struct statfs fs;
++	static struct mntent ent;
++	if(statfs(path, &fs) != 0)
++		return NULL;
++	ent.mnt_fsname = fs.f_mntfromname;
++	ent.mnt_dir = fs.f_mntonname;
++	ent.mnt_type = fs.f_fstypename;
++	ent.mnt_opts = (char *)"";
++	return &ent;
++}
++#else
+ struct mntent *get_filesystem_details(const char *path)
+ {
+ 	// stat the file in question
+@@ -368,6 +387,7 @@ struct mntent *get_filesystem_details(const char *path)
+ 
+ 	return found ? ent : NULL;
+ }
++#endif
+ 
+ // Credits: https://stackoverflow.com/a/55410469
+ static char *trim(char *str)
+@@ -389,7 +409,7 @@ static char *trim(char *str)
+ static int copy_file(const char *source, const char *destination)
+ {
+ // Check glibc >= 2.27 for copy_file_range()
+-#if __GLIBC__ > 2 ||  (__GLIBC__ == 2 && (__GLIBC_MINOR__ >= 27 ))
++#if __GLIBC__ > 2 ||  (__GLIBC__ == 2 && (__GLIBC_MINOR__ >= 27 )) || defined(__FreeBSD__)
+ 	int fd_in, fd_out;
+ 	struct stat stat;
+ 	size_t len;
+@@ -878,7 +898,7 @@ enum verify_result verify_FTL(bool verbose)
+ {
+ 	// Get the filename of the current executable
+ 	char filename[PATH_MAX] = { 0 };
+-	if(readlink("/proc/self/exe", filename, sizeof(filename)) == -1)
++	if(self_exe(filename, sizeof(filename)) == -1)
+ 	{
+ 		log_err("Failed to read self filename: %s", strerror(errno));
+ 		return VERIFY_ERROR;
+diff --git src/files.h src/files.h
+index 63256e7c..2a4f7ac3 100644
+--- src/files.h
++++ src/files.h
+@@ -13,7 +13,7 @@
+ #include <stdbool.h>
+ #include <sys/stat.h>
+ // setmntent()
+-#include <mntent.h>
++#include "compat/mntent.h"
+ // SHA256_DIGEST_SIZE
+ #include <nettle/sha2.h>
+ // getpwuid()
+diff --git src/gc.c src/gc.c
+index 569676d2..6ada2511 100644
+--- src/gc.c
++++ src/gc.c
+@@ -27,7 +27,7 @@
+ // logg_rate_limit_message()
+ #include "database/message-table.h"
+ // get_nprocs()
+-#include <sys/sysinfo.h>
++#include "compat/sysinfo.h"
+ // get_path_usage()
+ #include "files.h"
+ // void calc_cpu_usage()
+diff --git src/ntp/client.c src/ntp/client.c
+index 0965e320..62284901 100644
+--- src/ntp/client.c
++++ src/ntp/client.c
+@@ -275,6 +275,7 @@ static bool settime_skew(const double offset)
+ 	// reference using adjtimex() it will update a designated RTC
+ 	// periodically every 11 minutes.
+ 
++#ifdef __linux__
+ 	struct timex tx = { 0 };
+ 	tx.offset = 1000000 * offset;
+ 	tx.modes = ADJ_OFFSET_SINGLESHOT;
+@@ -282,6 +283,15 @@ static bool settime_skew(const double offset)
+ 	log_debug(DEBUG_NTP, "Gradually adjusting system time by %"PRId64" us", (int64_t)tx.offset);
+ 
+ 	if(adjtimex(&tx) < 0)
++#else
++	// adjtime() slews the clock the way ADJ_OFFSET_SINGLESHOT does
++	const int64_t usec = (int64_t)(1000000 * offset);
++	struct timeval delta = { .tv_sec = usec / 1000000, .tv_usec = usec % 1000000 };
++
++	log_debug(DEBUG_NTP, "Gradually adjusting system time by %"PRId64" us", usec);
++
++	if(adjtime(&delta, NULL) < 0)
++#endif
+ 	{
+ 		char errbuf[1024];
+ 		strncpy(errbuf, "Failed to adjust time during NTP sync: ", sizeof(errbuf));
+diff --git src/ntp/rtc.c src/ntp/rtc.c
+index b15391a3..04e1becc 100644
+--- src/ntp/rtc.c
++++ src/ntp/rtc.c
+@@ -13,6 +13,15 @@
+ 
+ #include "ntp/ntp.h"
+ 
++#ifndef __linux__
++// The kernel writes the system time back to the RTC whenever it is set, so
++// there is nothing left to do here
++bool ntp_sync_rtc(void)
++{
++	return true;
++}
++#else
++
+ // ioctl()
+ #include <sys/ioctl.h>
+ // RTC
+@@ -318,3 +327,4 @@ bool ntp_sync_rtc(void)
+ 
+ 	return true;
+ }
++#endif // __linux__
+diff --git src/ntp/server.c src/ntp/server.c
+index 402637be..27f4c5ad 100644
+--- src/ntp/server.c
++++ src/ntp/server.c
+@@ -32,8 +32,7 @@
+ #include <sys/timex.h>
+ // pthread_create
+ #include <pthread.h>
+-// PR_SET_NAME
+-#include <sys/prctl.h>
++// PR_SET_NAME is provided through FTL.h
+ // config struct
+ #include "config/config.h"
+ // log_ntp_message()
+@@ -102,7 +101,11 @@ static bool ntp_reply(const int socket_fd, const struct sockaddr *saddr_p, const
+ 		// reports it synchronized, otherwise announce that we are
+ 		// unsynchronized (LI = 3, stratum 16) as RFC 5905 requires
+ 		struct timex tx = { 0 };
++#ifdef __linux__
+ 		const int state = adjtimex(&tx);
++#else
++		const int state = ntp_adjtime(&tx);
++#endif
+ 		if(state >= 0 && state != TIME_ERROR)
+ 		{
+ 			stratum = 2;
+diff --git src/shmem.c src/shmem.c
+index 8e7b5e11..d6247e23 100644
+--- src/shmem.c
++++ src/shmem.c
+@@ -1083,6 +1083,7 @@ static bool create_shm(const char *suffix, SharedMemory *sharedMemory, const siz
+ 		return sharedMemory;
+ 	}
+ 
++#ifdef __linux__
+ 	// Create exclusive file lock on shared memory object
+ 	// The lock will be automatically released when the file descriptor is closed
+ 	sharedMemory->lock.l_type = F_WRLCK; // write = exclusive lock
+@@ -1098,6 +1099,7 @@ static bool create_shm(const char *suffix, SharedMemory *sharedMemory, const siz
+ 		close(sharedMemory->fd);
+ 		return sharedMemory;
+ 	}
++#endif // __linux__: elsewhere POSIX shared memory takes no file locks; O_EXCL above is what keeps it ours
+ 
+ 	// Allocate shared memory object to specified size
+ 	// Using f[tl]allocate() will ensure that there's actually space for
+@@ -1277,7 +1279,15 @@ static bool realloc_shm(SharedMemory *sharedMemory, const size_t size1, const si
+ 		local_shm_counter++;
+ 	}
+ 
++#ifdef __linux__
+ 	void *new_ptr = mremap(sharedMemory->ptr, sharedMemory->size, new_size, MREMAP_MAYMOVE);
++#else
++	// No mremap(): map the object again at its new size, then drop the old
++	// mapping. Both are views of the same object, so nothing is copied
++	void *new_ptr = mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_SHARED, sharedMemory->fd, 0);
++	if(new_ptr != MAP_FAILED)
++		munmap(sharedMemory->ptr, sharedMemory->size);
++#endif
+ 	if(new_ptr == MAP_FAILED)
+ 	{
+ 		log_crit("realloc_shm(): mremap(%p, %zu, %zu, MREMAP_MAYMOVE): Failed to reallocate \"%s\": %s",
+diff --git src/signals.c src/signals.c
+index 12785613..3dde71f7 100644
+--- src/signals.c
++++ src/signals.c
+@@ -20,6 +20,7 @@
+ #  include <sys/wait.h>  // waitpid()/WIFEXITED() - reap the addr2line child
+ #endif
+ #include <sys/mman.h>    // mmap() - alternate signal stack with a guard page
++#include "compat/selfexe.h"
+ #include "signals.h"
+ // logging routines
+ #include "log.h"
+@@ -82,7 +83,7 @@ void init_backtrace(const char *argv0)
+ #if defined(USE_UNWIND)
+ 	// /proc/self/exe gives the canonical absolute path even when argv[0] is
+ 	// a relative path, a bare binary name, or a symlink.
+-	ssize_t len = readlink("/proc/self/exe", bin_path, sizeof(bin_path) - 1u);
++	ssize_t len = self_exe(bin_path, sizeof(bin_path) - 1u);
+ 	if(len > 0)
+ 		bin_path[len] = '\0';
+ 	else if(argv0 != NULL)
+@@ -311,7 +312,13 @@ static int collect_from_signal_context(void **frames, const int max_frames, void
+ 	uintptr_t ip = 0;
+ 	uintptr_t fp = 0;
+ 
+-#if defined(__x86_64__)
++#if defined(__FreeBSD__) && defined(__x86_64__)
++	ip = (uintptr_t)uc->uc_mcontext.mc_rip;
++	fp = (uintptr_t)uc->uc_mcontext.mc_rbp;
++#elif defined(__FreeBSD__) && defined(__aarch64__)
++	ip = (uintptr_t)uc->uc_mcontext.mc_gpregs.gp_elr;
++	fp = (uintptr_t)uc->uc_mcontext.mc_gpregs.gp_x[29];
++#elif defined(__x86_64__)
+ 	ip = (uintptr_t)uc->uc_mcontext.gregs[REG_RIP];
+ 	fp = (uintptr_t)uc->uc_mcontext.gregs[REG_RBP];
+ #elif defined(__aarch64__)
+diff --git src/syscalls/ftlallocate.c src/syscalls/ftlallocate.c
+index b1330ae7..8ff35930 100644
+--- src/syscalls/ftlallocate.c
++++ src/syscalls/ftlallocate.c
+@@ -27,6 +27,18 @@ int FTLfallocate(const int fd, const off_t offset, const off_t len, const char *
+ 	// interruption by an incoming signal
+ 	while(ret == EINTR);
+ 
++#ifndef __linux__
++	// Shared memory objects may not support reserving space; growing them
++	// with ftruncate() is what is left
++	if(ret == EINVAL || ret == ENODEV || ret == EOPNOTSUPP || ret == ESPIPE)
++	{
++		struct stat st;
++		ret = 0;
++		if(fstat(fd, &st) == 0 && st.st_size < offset + len && ftruncate(fd, offset + len) != 0)
++			ret = errno;
++	}
++#endif
++
+ 	// Final error checking (may have failed for some other reason then an
+ 	// EINTR = interrupted system call)
+ 	if(ret > 0)
+diff --git src/tools/arp-scan.c src/tools/arp-scan.c
+index 0861fe8e..a583d435 100644
+--- src/tools/arp-scan.c
++++ src/tools/arp-scan.c
+@@ -7,6 +7,21 @@
+ *
+ *  This file is copyright under the latest version of the EUPL.
+ *  Please see LICENSE file for your rights under this license. */
++#ifndef __linux__
++#include "FTL.h"
++#include "arp-scan.h"
++#include <stdio.h>
++#include <stdlib.h>
++
++int run_arp_scan(const bool scan_all, const bool extreme_mode)
++{
++	(void)scan_all;
++	(void)extreme_mode;
++	puts("arp-scan is not supported on this platform yet");
++	return EXIT_FAILURE;
++}
++#else
++
+ // Inspired by https://stackoverflow.com/a/39287433 but heavily modified
+ 
+ #include "FTL.h"
+@@ -787,3 +802,4 @@ int run_arp_scan(const bool scan_all, const bool extreme_mode)
+ 
+ 	return EXIT_SUCCESS;
+ }
++#endif // __linux__
+diff --git src/tools/dhcp-discover.c src/tools/dhcp-discover.c
+index 95375abc..410ee6b1 100644
+--- src/tools/dhcp-discover.c
++++ src/tools/dhcp-discover.c
+@@ -7,6 +7,19 @@
+ *
+ *  This file is copyright under the latest version of the EUPL.
+ *  Please see LICENSE file for your rights under this license. */
++#ifndef __linux__
++#include "FTL.h"
++#include "dhcp-discover.h"
++#include <stdio.h>
++#include <stdlib.h>
++
++int run_dhcp_discover(void)
++{
++	puts("dhcp-discover is not supported on this platform yet");
++	return EXIT_FAILURE;
++}
++#else
++
+ 
+ #define FTLDNS
+ #include "dnsmasq/dnsmasq.h"
+@@ -948,3 +961,4 @@ int run_dhcp_discover(void)
+ 
+ 	return EXIT_SUCCESS;
+ }
++#endif // __linux__
+diff --git src/tools/dhcpv6-discover.c src/tools/dhcpv6-discover.c
+index 6bcabd4d..e6eb4728 100644
+--- src/tools/dhcpv6-discover.c
++++ src/tools/dhcpv6-discover.c
+@@ -9,6 +9,20 @@
+ *
+ *  This file is copyright under the latest version of the EUPL.
+ *  Please see LICENSE file for your rights under this license. */
++#ifndef __linux__
++#include "FTL.h"
++#include "dhcpv6-discover.h"
++#include <stdio.h>
++#include <stdlib.h>
++
++int dhcpv6_discover_iface(const char *ifname, const unsigned int timeout)
++{
++	(void)ifname;
++	(void)timeout;
++	return 0;
++}
++#else
++
+ 
+ #include "dhcpv6-discover.h"
+ #include "dhcp-discover.h"
+@@ -859,3 +873,4 @@ int dhcpv6_discover_iface(const char *ifname, const unsigned int timeout)
+ 
+ 	return do_discoverv6(fd, ifname, timeout);
+ }
++#endif // __linux__
+diff --git src/tools/netlink.c src/tools/netlink.c
+index 4318c46f..7ebe5d70 100644
+--- src/tools/netlink.c
++++ src/tools/netlink.c
+@@ -278,6 +278,7 @@ static int nlparsemsg_route(struct rtmsg *rt, void *buf, size_t len, cJSON *rout
+ 				break;
+ 			}
+ 
++#ifdef __linux__
+ 			case RTA_METRICS: // nested RTAX_* route metrics
+ 			{
+ 				if(!detailed)
+@@ -301,6 +302,7 @@ static int nlparsemsg_route(struct rtmsg *rt, void *buf, size_t len, cJSON *rout
+ 				cJSON_AddItemToObject(route, rtaTypeToString(rta->rta_type), metrics);
+ 				break;
+ 			}
++#endif
+ 
+ 			case RTA_TTL_PROPAGATE: // propagate TTL
+ 			case RTA_IP_PROTO: // IP protocol
+@@ -395,6 +397,7 @@ static int nlparsemsg_route(struct rtmsg *rt, void *buf, size_t len, cJSON *rout
+ 				break;
+ 			}
+ 
++#ifdef __linux__
+ 			case RTA_MFC_STATS: // multicast forwarding cache statistics
+ 			{
+ 				if(!detailed)
+@@ -407,7 +410,9 @@ static int nlparsemsg_route(struct rtmsg *rt, void *buf, size_t len, cJSON *rout
+ 				cJSON_AddNumberToObject(route, "mfcs_wrong_if", mfc->mfcs_wrong_if);
+ 				break;
+ 			}
++#endif
+ 
++#ifdef __linux__
+ 			case RTA_CACHEINFO:
+ 			{
+ 				if(!detailed)
+@@ -428,6 +433,7 @@ static int nlparsemsg_route(struct rtmsg *rt, void *buf, size_t len, cJSON *rout
+ 				cJSON_AddNumberToObject(route, "used", ci->rta_used);
+ 				break;
+ 			}
++#endif
+ 
+ 			default:
+ 			{
+@@ -1205,6 +1211,7 @@ static int nlparsemsg_link(struct ifinfomsg *ifi, void *buf, size_t len, cJSON *
+ 				break;
+ 			}
+ 
++#ifdef __linux__
+ 			case IFLA_VFINFO_LIST:
+ 			{
+ 				if(!detailed)
+@@ -1268,7 +1275,9 @@ static int nlparsemsg_link(struct ifinfomsg *ifi, void *buf, size_t len, cJSON *
+ 
+ 				break;
+ 			}
++#endif
+ 
++#ifdef __linux__
+ 			case IFLA_EVENT:
+ 			{
+ 				if(!detailed)
+@@ -1286,7 +1295,9 @@ static int nlparsemsg_link(struct ifinfomsg *ifi, void *buf, size_t len, cJSON *
+ 					cJSON_AddNumberToObject(link, "event", event);
+ 				break;
+ 			}
++#endif
+ 
++#ifdef __linux__
+ 			case IFLA_AF_SPEC:
+ 			{
+ 				if(!detailed)
+@@ -1323,6 +1334,7 @@ static int nlparsemsg_link(struct ifinfomsg *ifi, void *buf, size_t len, cJSON *
+ 				cJSON_AddItemToObject(link, "af_specs", af_specs);
+ 				break;
+ 			}
++#endif
+ 
+ 			case IFLA_XDP:
+ 				// Parsing XDP needs a full BPF program
+diff --git src/tools/netlink.h src/tools/netlink.h
+index 3c03c162..7d3be948 100644
+--- src/tools/netlink.h
++++ src/tools/netlink.h
+@@ -14,6 +14,7 @@
+ #include "webserver/cJSON/cJSON.h"
+ #include "webserver/json_macros.h"
+ 
++#ifdef __linux__
+ #include <linux/rtnetlink.h>
+ // IFF_UP, etc.
+ #include <net/if.h>
+@@ -22,6 +23,23 @@
+ #ifndef _NET_IF_ARP_H
+ #include <linux/if_arp.h>
+ #endif
++#else
++// FreeBSD's netlink(4) speaks rtnetlink with Linux's names
++#include <sys/socket.h>
++#include <net/if.h>
++#include <net/if_arp.h>
++#include <netlink/netlink.h>
++#include <netlink/netlink_route.h>
++// Linux's definitions, whose types the code below is written against
++#undef RTA_LENGTH
++#undef RTA_OK
++#undef RTA_PAYLOAD
++#define RTA_LENGTH(len)	(RTA_ALIGN(sizeof(struct rtattr)) + (len))
++#define RTA_OK(rta,len) ((len) >= (int)sizeof(struct rtattr) && \
++	(rta)->rta_len >= sizeof(struct rtattr) && \
++	(rta)->rta_len <= (len))
++#define RTA_PAYLOAD(rta) ((int)((rta)->rta_len) - RTA_LENGTH(0))
++#endif
+ 
+ bool nlroutes(cJSON *routes, const bool detailed);
+ bool nladdrs(cJSON *interfaces, const bool detailed);
+diff --git src/tools/netlink_consts.h src/tools/netlink_consts.h
+index 0ff71330..c7441ed9 100644
+--- src/tools/netlink_consts.h
++++ src/tools/netlink_consts.h
+@@ -12,78 +12,206 @@
+ 
+ static struct flag_names iflatypes[] =
+ {
++#if defined(__linux__) || defined(ARPHRD_NETROM)
+ 	{ ARPHRD_NETROM, "netrom" },
++#endif
+ 	{ ARPHRD_ETHER, "ether" },
++#if defined(__linux__) || defined(ARPHRD_EETHER)
+ 	{ ARPHRD_EETHER, "eether" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_AX25)
+ 	{ ARPHRD_AX25, "ax25" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_PRONET)
+ 	{ ARPHRD_PRONET, "pronet" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_CHAOS)
+ 	{ ARPHRD_CHAOS, "chaos" },
++#endif
+ 	{ ARPHRD_IEEE802, "ieee802" },
++#if defined(__linux__) || defined(ARPHRD_ARCNET)
+ 	{ ARPHRD_ARCNET, "arcnet" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_APPLETLK)
+ 	{ ARPHRD_APPLETLK, "appletlk" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_DLCI)
+ 	{ ARPHRD_DLCI, "dlci" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_ATM)
+ 	{ ARPHRD_ATM, "atm" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_METRICOM)
+ 	{ ARPHRD_METRICOM, "metricom" },
++#endif
+ 	{ ARPHRD_IEEE1394, "ieee1394" },
++#if defined(__linux__) || defined(ARPHRD_EUI64)
+ 	{ ARPHRD_EUI64, "eui64" },
++#endif
+ 	{ ARPHRD_INFINIBAND, "infiniband" },
++#if defined(__linux__) || defined(ARPHRD_SLIP)
+ 	{ ARPHRD_SLIP, "slip" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_CSLIP)
+ 	{ ARPHRD_CSLIP, "cslip" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_SLIP6)
+ 	{ ARPHRD_SLIP6, "slip6" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_CSLIP6)
+ 	{ ARPHRD_CSLIP6, "cslip6" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_RSRVD)
+ 	{ ARPHRD_RSRVD, "rsrvd" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_ADAPT)
+ 	{ ARPHRD_ADAPT, "adapt" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_ROSE)
+ 	{ ARPHRD_ROSE, "rose" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_X25)
+ 	{ ARPHRD_X25, "x25" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_HWX25)
+ 	{ ARPHRD_HWX25, "hwx25" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_CAN)
+ 	{ ARPHRD_CAN, "can" },
++#endif
+ #if defined (ARPHRD_MCTP)
+ 	// 2025-May: kernel version dependent
+ 	{ ARPHRD_MCTP, "mctp" },
+ #endif
++#if defined(__linux__) || defined(ARPHRD_PPP)
+ 	{ ARPHRD_PPP, "ppp" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_CISCO)
+ 	{ ARPHRD_CISCO, "cisco" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_HDLC)
+ 	{ ARPHRD_HDLC, "hdlc" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_CISCO)
+ 	{ ARPHRD_CISCO, "cisco" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_LAPB)
+ 	{ ARPHRD_LAPB, "lapb" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_DDCMP)
+ 	{ ARPHRD_DDCMP, "ddcmp" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_RAWHDLC)
+ 	{ ARPHRD_RAWHDLC, "rawhdlc" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_RAWIP)
+ 	{ ARPHRD_RAWIP, "rawip" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_TUNNEL)
+ 	{ ARPHRD_TUNNEL, "tunnel" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_TUNNEL6)
+ 	{ ARPHRD_TUNNEL6, "tunnel6" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_FRAD)
+ 	{ ARPHRD_FRAD, "frad" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_SKIP)
+ 	{ ARPHRD_SKIP, "skip" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_LOOPBACK)
+ 	{ ARPHRD_LOOPBACK, "loopback" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_LOCALTLK)
+ 	{ ARPHRD_LOCALTLK, "localtlk" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_FDDI)
+ 	{ ARPHRD_FDDI, "fddi" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_BIF)
+ 	{ ARPHRD_BIF, "bif" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_SIT)
+ 	{ ARPHRD_SIT, "sit" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_IPDDP)
+ 	{ ARPHRD_IPDDP, "ipddp" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_IPGRE)
+ 	{ ARPHRD_IPGRE, "ipgre" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_PIMREG)
+ 	{ ARPHRD_PIMREG, "pimreg" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_HIPPI)
+ 	{ ARPHRD_HIPPI, "hippi" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_ASH)
+ 	{ ARPHRD_ASH, "ash" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_ECONET)
+ 	{ ARPHRD_ECONET, "econet" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_IRDA)
+ 	{ ARPHRD_IRDA, "irda" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_FCPP)
+ 	{ ARPHRD_FCPP, "fcpp" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_FCAL)
+ 	{ ARPHRD_FCAL, "fcal" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_FCPL)
+ 	{ ARPHRD_FCPL, "fcpl" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_FCFABRIC)
+ 	{ ARPHRD_FCFABRIC, "fcfabric" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_IEEE802_TR)
+ 	{ ARPHRD_IEEE802_TR, "ieee802_tr" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_IEEE80211)
+ 	{ ARPHRD_IEEE80211, "ieee80211" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_IEEE80211_PRISM)
+ 	{ ARPHRD_IEEE80211_PRISM, "ieee80211_prism" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_IEEE80211_RADIOTAP)
+ 	{ ARPHRD_IEEE80211_RADIOTAP, "ieee80211_radiotap" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_IEEE802154)
+ 	{ ARPHRD_IEEE802154, "ieee802154" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_IEEE802154_MONITOR)
+ 	{ ARPHRD_IEEE802154_MONITOR, "ieee802154_monitor" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_PHONET)
+ 	{ ARPHRD_PHONET, "phonet" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_PHONET_PIPE)
+ 	{ ARPHRD_PHONET_PIPE, "phonet_pipe" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_CAIF)
+ 	{ ARPHRD_CAIF, "caif" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_IP6GRE)
+ 	{ ARPHRD_IP6GRE, "ip6gre" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_NETLINK)
+ 	{ ARPHRD_NETLINK, "netlink" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_6LOWPAN)
+ 	{ ARPHRD_6LOWPAN, "6lowpan" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_VSOCKMON)
+ 	{ ARPHRD_VSOCKMON, "vsockmon" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_VOID)
+ 	{ ARPHRD_VOID, "void" },
++#endif
++#if defined(__linux__) || defined(ARPHRD_NONE)
+ 	{ ARPHRD_NONE, "none" },
++#endif
+ };
+ 
+ static struct flag_names ifaf_flags[] = {
+@@ -108,17 +236,29 @@ static struct flag_names iff_flags[] = {
+ 	{ IFF_DEBUG, "debug" },
+ 	{ IFF_LOOPBACK, "loopback" },
+ 	{ IFF_POINTOPOINT, "pointopoint" },
++#if defined(__linux__) || defined(IFF_NOTRAILERS)
+ 	{ IFF_NOTRAILERS, "notrailers" },
++#endif
+ 	{ IFF_RUNNING, "running" },
+ 	{ IFF_NOARP, "noarp" },
+ 	{ IFF_PROMISC, "promisc" },
+ 	{ IFF_ALLMULTI, "allmulti" },
++#if defined(__linux__) || defined(IFF_MASTER)
+ 	{ IFF_MASTER, "master" },
++#endif
++#if defined(__linux__) || defined(IFF_SLAVE)
+ 	{ IFF_SLAVE, "slave" },
++#endif
+ 	{ IFF_MULTICAST, "multicast" },
++#if defined(__linux__) || defined(IFF_PORTSEL)
+ 	{ IFF_PORTSEL, "portsel" },
++#endif
++#if defined(__linux__) || defined(IFF_AUTOMEDIA)
+ 	{ IFF_AUTOMEDIA, "automedia" },
++#endif
++#if defined(__linux__) || defined(IFF_DYNAMIC)
+ 	{ IFF_DYNAMIC, "dynamic" },
++#endif
+ #ifdef IFF_LOWER_UP
+ 	{ IFF_LOWER_UP, "lower_up" },
+ #endif
+@@ -220,22 +360,48 @@ static struct flag_names ifstates[] = {
+ 	{ IF_OPER_UP, "up" },
+ };
+ 
++#ifdef __linux__
+ static struct flag_names link_events[] = {
++#if defined(__linux__) || defined(IFLA_EVENT_NONE)
+ 	{ IFLA_EVENT_NONE, "none" },
++#endif
++#if defined(__linux__) || defined(IFLA_EVENT_REBOOT)
+ 	{ IFLA_EVENT_REBOOT, "reboot" },
++#endif
++#if defined(__linux__) || defined(IFLA_EVENT_FEATURES)
+ 	{ IFLA_EVENT_FEATURES, "feature change" },
++#endif
++#if defined(__linux__) || defined(IFLA_EVENT_BONDING_FAILOVER)
+ 	{ IFLA_EVENT_BONDING_FAILOVER, "bonding failover" },
++#endif
++#if defined(__linux__) || defined(IFLA_EVENT_NOTIFY_PEERS)
+ 	{ IFLA_EVENT_NOTIFY_PEERS, "notify peers" },
++#endif
++#if defined(__linux__) || defined(IFLA_EVENT_IGMP_RESEND)
+ 	{ IFLA_EVENT_IGMP_RESEND, "resend igmp" },
++#endif
++#if defined(__linux__) || defined(IFLA_EVENT_BONDING_OPTIONS)
+ 	{ IFLA_EVENT_BONDING_OPTIONS, "bonding option" },
++#endif
+ };
++#endif
+ 
++#ifdef __linux__
+ static struct flag_names addr_gen_modes[] = {
++#if defined(__linux__) || defined(IN6_ADDR_GEN_MODE_EUI64)
+ 	{ IN6_ADDR_GEN_MODE_EUI64, "eui64" },
++#endif
++#if defined(__linux__) || defined(IN6_ADDR_GEN_MODE_NONE)
+ 	{ IN6_ADDR_GEN_MODE_NONE, "none" },
++#endif
++#if defined(__linux__) || defined(IN6_ADDR_GEN_MODE_STABLE_PRIVACY)
+ 	{ IN6_ADDR_GEN_MODE_STABLE_PRIVACY, "stable_secret" },
++#endif
++#if defined(__linux__) || defined(IN6_ADDR_GEN_MODE_RANDOM)
+ 	{ IN6_ADDR_GEN_MODE_RANDOM, "random" },
++#endif
+ };
++#endif
+ 
+ static const char *__attribute__ ((const)) rtaTypeToString(const int rta_type)
+ {
+@@ -467,6 +633,7 @@ static const char *__attribute__ ((const)) iflaTypeToString(const int ifla_type)
+ }
+ 
+ // Names of the RTAX_* attributes nested in RTA_METRICS (as used by iproute2)
++#ifdef __linux__
+ static const char *__attribute__ ((const)) rtaxTypeToString(const int rtax_type)
+ {
+ 	switch (rtax_type) {
+@@ -508,6 +675,7 @@ static const char *__attribute__ ((const)) rtaxTypeToString(const int rtax_type)
+ 			return "unknown";
+ 	}
+ }
++#endif
+ 
+ static const char *__attribute__ ((const)) family_name(int family)
+ {
+@@ -519,54 +687,88 @@ static const char *__attribute__ ((const)) family_name(int family)
+ 			return "local";
+ 		case PF_INET:
+ 			return "inet";
++#if defined(__linux__) || defined(PF_AX25)
+ 		case PF_AX25:
+ 			return "ax25";
++#endif
+ 		case PF_IPX:
+ 			return "ipx";
+ 		case PF_APPLETALK:
+ 			return "appletalk";
++#if defined(__linux__) || defined(PF_NETROM)
+ 		case PF_NETROM:
+ 			return "netrom";
++#endif
++#if defined(__linux__) || defined(PF_BRIDGE)
+ 		case PF_BRIDGE:
+ 			return "bridge";
++#endif
++#if defined(__linux__) || defined(PF_ATMPVC)
+ 		case PF_ATMPVC:
+ 			return "atmpvc";
++#endif
++#if defined(__linux__) || defined(PF_X25)
+ 		case PF_X25:
+ 			return "x25";
++#endif
+ 		case PF_INET6:
+ 			return "inet6";
++#if defined(__linux__) || defined(PF_ROSE)
+ 		case PF_ROSE:
+ 			return "rose";
++#endif
+ 		case PF_DECnet:
+ 			return "decnet";
++#if defined(__linux__) || defined(PF_NETBEUI)
+ 		case PF_NETBEUI:
+ 			return "netbeui";
++#endif
++#if defined(__linux__) || defined(PF_SECURITY)
+ 		case PF_SECURITY:
+ 			return "security";
++#endif
+ 		case PF_KEY:
+ 			return "key";
+ 		case PF_NETLINK:
+ 			return "netlink";
++#if defined(__linux__) || defined(PF_PACKET)
+ 		case PF_PACKET:
+ 			return "packet";
++#endif
++#if defined(__linux__) || defined(PF_ASH)
+ 		case PF_ASH:
+ 			return "ash";
++#endif
++#if defined(__linux__) || defined(PF_ECONET)
+ 		case PF_ECONET:
+ 			return "econet";
++#endif
++#if defined(__linux__) || defined(PF_ATMSVC)
+ 		case PF_ATMSVC:
+ 			return "atmsvc";
++#endif
++#if defined(__linux__) || defined(PF_RDS)
+ 		case PF_RDS:
+ 			return "rds";
++#endif
+ 		case PF_SNA:
+ 			return "sna";
++#if defined(__linux__) || defined(PF_IRDA)
+ 		case PF_IRDA:
+ 			return "irda";
++#endif
++#if defined(__linux__) || defined(PF_PPPOX)
+ 		case PF_PPPOX:
+ 			return "pppox";
++#endif
++#if defined(__linux__) || defined(PF_WANPIPE)
+ 		case PF_WANPIPE:
+ 			return "wanpipe";
++#endif
++#if defined(__linux__) || defined(PF_LLC)
+ 		case PF_LLC:
+ 			return "llc";
++#endif
+ #if defined (PF_IB)
+ 		// 2025-May: defined by glibc but not uClibc
+ 		case PF_IB:
+@@ -577,36 +779,62 @@ static const char *__attribute__ ((const)) family_name(int family)
+ 		case PF_MPLS:
+ 			return "mpls";
+ #endif
++#if defined(__linux__) || defined(PF_CAN)
+ 		case PF_CAN:
+ 			return "can";
++#endif
++#if defined(__linux__) || defined(PF_TIPC)
+ 		case PF_TIPC:
+ 			return "tipc";
++#endif
+ 		case PF_BLUETOOTH:
+ 			return "bluetooth";
++#if defined(__linux__) || defined(PF_IUCV)
+ 		case PF_IUCV:
+ 			return "iucv";
++#endif
++#if defined(__linux__) || defined(PF_RXRPC)
+ 		case PF_RXRPC:
+ 			return "rxrpc";
++#endif
+ 		case PF_ISDN:
+ 			return "isdn";
++#if defined(__linux__) || defined(PF_PHONET)
+ 		case PF_PHONET:
+ 			return "phonet";
++#endif
++#if defined(__linux__) || defined(PF_IEEE802154)
+ 		case PF_IEEE802154:
+ 			return "ieee802154";
++#endif
++#if defined(__linux__) || defined(PF_CAIF)
+ 		case PF_CAIF:
+ 			return "caif";
++#endif
++#if defined(__linux__) || defined(PF_ALG)
+ 		case PF_ALG:
+ 			return "alg";
++#endif
++#if defined(__linux__) || defined(PF_NFC)
+ 		case PF_NFC:
+ 			return "nfc";
++#endif
++#if defined(__linux__) || defined(PF_VSOCK)
+ 		case PF_VSOCK:
+ 			return "vsock";
++#endif
++#if defined(__linux__) || defined(PF_KCM)
+ 		case PF_KCM:
+ 			return "kcm";
++#endif
++#if defined(__linux__) || defined(PF_QIPCRTR)
+ 		case PF_QIPCRTR:
+ 			return "qipcrtr";
++#endif
++#if defined(__linux__) || defined(PF_SMC)
+ 		case PF_SMC:
+ 			return "smc";
++#endif
+ #if defined (PF_XDP)
+ 		// 2025-May: defined by glibc but not uClibc
+ 		case PF_XDP:
+@@ -628,6 +856,7 @@ static const char *__attribute__ ((const)) family_name(int family)
+ #define parse_rtattr_one_nested(type, rta) \
+ 	(parse_rtattr_one(type, RTA_DATA(rta), RTA_PAYLOAD(rta)))
+ 
++#ifdef __linux__
+ static int parse_rtattr_flags(struct rtattr *tb[], int max,
+                               struct rtattr *rta, int len,
+                               unsigned short flags)
+@@ -643,7 +872,9 @@ static int parse_rtattr_flags(struct rtattr *tb[], int max,
+ 	}
+ 	return 0;
+ }
++#endif
+ 
++#ifdef __linux__
+ static struct rtattr * __attribute__((pure)) parse_rtattr_one(int type, struct rtattr *rta, int len)
+ {
+ 	while (RTA_OK(rta, len)) {
+@@ -653,3 +884,4 @@ static struct rtattr * __attribute__((pure)) parse_rtattr_one(int type, struct r
+ 	}
+ 	return NULL;
+ }
++#endif
+diff --git src/webserver/webserver.c src/webserver/webserver.c
+index c1e47e2f..04490fdc 100644
+--- src/webserver/webserver.c
++++ src/webserver/webserver.c
+@@ -19,7 +19,7 @@
+ // log_web()
+ #include "log.h"
+ // get_nprocs()
+-#include <sys/sysinfo.h>
++#include "compat/sysinfo.h"
+ // file_readable()
+ #include "files.h"
+ // generate_certificate()

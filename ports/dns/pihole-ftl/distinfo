@@ -1,3 +1,3 @@
-TIMESTAMP = 1792665969
-SHA256 (pihole-ftl/46a4fa0d39b4f8e693124c33b24dc66c85afc96b.tar.gz) = 441f574add01af7b65484c79d06ee4cf52bd2fbfb73742a836692c736e426da9
-SIZE (pihole-ftl/46a4fa0d39b4f8e693124c33b24dc66c85afc96b.tar.gz) = 5158771
+TIMESTAMP = 1793451037
+SHA256 (pihole-ftl/pi-hole-FTL-v6.8_GH0.tar.gz) = 93c237c43781e04e1f881536a81e65a3c9d32e052a6e61b4b3f70863d8c6c86b
+SIZE (pihole-ftl/pi-hole-FTL-v6.8_GH0.tar.gz) = 5138895

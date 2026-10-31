@@ -1,0 +1,460 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sarahmeow1986 <saretta1986@proton.me>
+Date: Thu, 22 Oct 2026 12:22:03 +0200
+Subject: [PATCH] Run the test suite on FreeBSD
+
+---
+ test/api/test_api.py           | 15 +++++--
+ test/bats_helper.bash          | 16 ++++++++
+ test/hostnames.sh              |  9 ++++-
+ test/pdns/setup.sh             | 18 ++++++++-
+ test/ptr_response_regression.c |  4 ++
+ test/run.sh                    | 71 +++++++++++++++++++++++++++++++---
+ test/test_final.bats           | 14 ++++---
+ test/test_suite.bats           | 55 +++++++++++++++++---------
+ 8 files changed, 166 insertions(+), 36 deletions(-)
+
+diff --git test/api/test_api.py test/api/test_api.py
+index f2206d96..a3d88f71 100644
+--- test/api/test_api.py
++++ test/api/test_api.py
+@@ -10,7 +10,9 @@ Usage:
+ """
+ 
+ import json
++import os
+ import re
++import sys
+ from urllib.parse import quote
+ 
+ import pytest
+@@ -1114,9 +1116,13 @@ class TestInfo:
+         assert "uptime" in s
+         assert s["memory"]["ram"]["total"] > 0
+         # All CPUs present, not only those in FTL's affinity mask
+-        with open("/sys/devices/system/cpu/present") as f:
+-            ranges = [r.split("-") for r in f.read().strip().split(",")]
+-        assert s["cpu"]["nprocs"] == sum(int(r[-1]) - int(r[0]) + 1 for r in ranges)
++        if os.path.exists("/sys/devices/system/cpu/present"):
++            with open("/sys/devices/system/cpu/present") as f:
++                ranges = [r.split("-") for r in f.read().strip().split(",")]
++            assert s["cpu"]["nprocs"] == sum(int(r[-1]) - int(r[0]) + 1 for r in ranges)
++        else:
++            # No sysfs (FreeBSD): hw.ncpu
++            assert s["cpu"]["nprocs"] == os.cpu_count()
+         assert "ftl" in s
+         assert "%mem" in s["ftl"]
+         assert "%cpu" in s["ftl"]
+@@ -1158,7 +1164,8 @@ class TestNetwork:
+         data = _j(api_session.get(f"{FTL_URL}/api/network/interfaces", timeout=5))
+         ifaces = data["interfaces"]
+         names = [i["name"] for i in ifaces]
+-        assert "lo" in names, json.dumps(names, indent=2)
++        loopback = "lo0" if sys.platform.startswith("freebsd") else "lo"
++        assert loopback in names, json.dumps(names, indent=2)
+ 
+ 
+ # ---------------------------------------------------------------------------
+diff --git test/bats_helper.bash test/bats_helper.bash
+index 24c93d48..daaccf34 100644
+--- test/bats_helper.bash
++++ test/bats_helper.bash
+@@ -21,3 +21,19 @@ bats::on_failure() {
+     printf "═══════════════════════════════════════════════════════════════════════════════\n"
+     printf "\n"
+ }
++
++# Runs a shell command as user pihole. FreeBSD's su has no -s (and -c names a
++# login class there), -m keeps the caller's shell instead
++as_pihole() {
++    if [[ "$(uname -s)" == "FreeBSD" ]]; then
++        su -m pihole -c "$1"
++    else
++        su pihole -s /bin/sh -c "$1"
++    fi
++}
++export -f as_pihole
++
++# Name of the loopback interface
++LO="lo"
++[[ "$(uname -s)" == "FreeBSD" ]] && LO="lo0"
++export LO
+diff --git test/hostnames.sh test/hostnames.sh
+index 9e341f7e..37017202 100644
+--- test/hostnames.sh
++++ test/hostnames.sh
+@@ -9,7 +9,14 @@ getIPs() {
+     local protocol
+     protocol=$2
+ 
+-    addresses="$(ip address show | sed "/${addr_type} /!d;s/^.*${addr_type} //g;s/\/.*$//g;")"
++    if [[ "$(uname -s)" == "FreeBSD" ]]; then
++        # Leave out 127.0.0.2 and up, which only stand in for the loopback
++        # network Linux answers on as a whole (test/run.sh), and link-local
++        # addresses, which come with a %scope
++        addresses="$(ifconfig -a "${addr_type}" | awk -v t="${addr_type}" '$1 == t && $2 !~ /^127\.0\.0\.([2-9]|[1-9][0-9]+)$/ && $2 !~ /%/ { print $2 }')"
++    else
++        addresses="$(ip address show | sed "/${addr_type} /!d;s/^.*${addr_type} //g;s/\/.*$//g;")"
++    fi
+     if [ -n "${addresses}" ]; then
+         while IFS= read -r addr ; do
+             # Check if Pi-hole can use itself to block a domain
+diff --git test/pdns/setup.sh test/pdns/setup.sh
+index 82194a8a..af327057 100644
+--- test/pdns/setup.sh
++++ test/pdns/setup.sh
+@@ -10,7 +10,12 @@ mkdir -p /var/lib/powerdns/
+ rm -f /var/lib/powerdns/pdns.sqlite3*
+ 
+ # Install config files
+-if [ -d /etc/powerdns ]; then
++if [ -d /usr/local/etc/pdns ]; then
++  # FreeBSD; the recursor's Lua script below still goes to /etc/pdns
++  cp test/pdns/pdns.conf /usr/local/etc/pdns/pdns.conf
++  RECURSOR_CONF=/usr/local/etc/pdns/recursor.conf
++  mkdir -p /etc/pdns
++elif [ -d /etc/powerdns ]; then
+   # Debian
+   cp test/pdns/pdns.conf /etc/powerdns/pdns.conf
+   RECURSOR_CONF=/etc/powerdns/recursor.conf
+@@ -38,6 +43,9 @@ if [ -f /usr/share/doc/pdns-backend-sqlite3/schema.sqlite3.sql ]; then
+ elif [ -f /usr/share/doc/pdns/schema.sqlite3.sql ]; then
+   # Alpine
+   ./pihole-FTL sqlite3 /var/lib/powerdns/pdns.sqlite3 < /usr/share/doc/pdns/schema.sqlite3.sql
++elif [ -f /usr/local/share/doc/pdns/schema.sqlite3.sql ]; then
++  # FreeBSD
++  ./pihole-FTL sqlite3 /var/lib/powerdns/pdns.sqlite3 < /usr/local/share/doc/pdns/schema.sqlite3.sql
+ else
+   echo "Error: powerDNS SQL schema not found"
+   exit 1
+@@ -222,7 +230,7 @@ echo "********* Done installing PowerDNS configuration **********"
+ for proc in pdns_server pdns_recursor; do
+   killall "$proc" 2> /dev/null || true
+   for _ in 1 2 3 4 5 6 7 8 9 10; do
+-    pidof "$proc" > /dev/null 2>&1 || break
++    pgrep -x "$proc" > /dev/null 2>&1 || break
+     sleep 0.2
+   done
+   killall -9 "$proc" 2> /dev/null || true
+@@ -249,6 +257,12 @@ wait_for_pdns() {
+   return 1
+ }
+ 
++# The FreeBSD package runs the server as user pdns, which has to be able to
++# write its zone database
++if [ "$(uname -s)" = "FreeBSD" ]; then
++  chown -R pdns:pdns /var/lib/powerdns
++fi
++
+ # Start authoritative pdns_server and wait for it to accept queries on
+ # its configured port (5554) before continuing.
+ pdns_server --daemon
+diff --git test/ptr_response_regression.c test/ptr_response_regression.c
+index 33cb2c5c..4d71e782 100644
+--- test/ptr_response_regression.c
++++ test/ptr_response_regression.c
+@@ -3,6 +3,10 @@
+ #include <arpa/inet.h>
+ #include <errno.h>
+ #include <netinet/in.h>
++// Not part of POSIX, so <netinet/in.h> may hide it under _POSIX_C_SOURCE
++#ifndef INADDR_LOOPBACK
++#define INADDR_LOOPBACK 0x7f000001
++#endif
+ #include <pthread.h>
+ #include <stdarg.h>
+ #include <stdbool.h>
+diff --git test/run.sh test/run.sh
+index 4555c48a..fea434bf 100755
+--- test/run.sh
++++ test/run.sh
+@@ -6,14 +6,59 @@ if [[ ${TEST} == "false" ]]; then
+   exit 0
+ fi
+ 
++FREEBSD=false
++[[ "$(uname -s)" == "FreeBSD" ]] && FREEBSD=true
++
+ # Create pihole user if it does not exist
+ if ! id -u pihole &> /dev/null; then
+-  useradd -m -s /usr/sbin/nologin pihole
++  if ${FREEBSD}; then
++    pw useradd pihole -m -s /usr/sbin/nologin
++  else
++    useradd -m -s /usr/sbin/nologin pihole
++  fi
++fi
++
++# FTL keeps its PID file in /var/run on FreeBSD, the tests look in /run
++if ${FREEBSD} && [[ ! -e /run ]]; then
++  ln -s /var/run /run
++fi
++
++if ${FREEBSD}; then
++  # Linux answers on all of 127.0.0.0/8, FreeBSD only on the addresses
++  # lo0 has; the tests act as clients 127.0.0.2 and up
++  for i in $(seq 2 63); do
++    ifconfig lo0 inet "127.0.0.${i}/32" alias 2> /dev/null
++  done
++  # The tests use GNU stat, date, touch and sed (coreutils and gsed packages)
++  gnubin="$(mktemp -d)"
++  ln -s /usr/local/bin/gnustat "${gnubin}/stat"
++  for tool in date touch sed; do
++    ln -s "/usr/local/bin/g${tool}" "${gnubin}/${tool}"
++  done
++  # Newer dig prints "; (1 server found)" after its header, which shifts the
++  # line numbers the tests check
++  printf '#!/usr/bin/env bash\nset -o pipefail\n/usr/local/bin/dig "$@" | sed "/^; ([0-9]* servers* found)$/d"\n' > "${gnubin}/dig"
++  chmod +x "${gnubin}/dig"
++  export PATH="${gnubin}:${PATH}"
++
++  # bash knows no real-time signals here, neither by name nor by number:
++  # hand those to kill(1) for every test
++  FTL_SIGRTMIN="$(./pihole-FTL sigrtmin)"
++  export FTL_SIGRTMIN
++  kill() {
++    if [[ "${1}" =~ ^-SIGRTMIN(\+([0-9]+))?$ ]]; then
++      shift
++      /bin/kill -"$((FTL_SIGRTMIN + ${BASH_REMATCH[2]:-0}))" "$@"
++    else
++      builtin kill "$@"
++    fi
++  }
++  export -f kill
+ fi
+ 
+ # Kill possibly running pihole-FTL process
+-while pidof -s pihole-FTL > /dev/null; do
+-  pid="$(pidof -s pihole-FTL)"
++while pgrep -x pihole-FTL > /dev/null; do
++  pid="$(pgrep -x pihole-FTL | head -n 1)"
+   echo "Terminating running pihole-FTL process with PID ${pid}"
+   kill "$pid"
+   sleep 1
+@@ -21,6 +66,10 @@ done
+ 
+ # Clean up possible old files from earlier test runs
+ rm -rf /etc/pihole /etc/dnsmasq.d /var/log/pihole /dev/shm/FTL-*
++if ${FREEBSD}; then
++  # POSIX shared memory is not a file system there
++  posixshmcontrol ls | awk '$NF ~ /^\/FTL-/ { print $NF }' | xargs -r posixshmcontrol rm
++fi
+ rm -f /tmp/dnsmasq_warnings /tmp/ftl_test_*.json
+ 
+ # Create necessary directories and files
+@@ -37,7 +86,12 @@ chown pihole:pihole /run/pihole-FTL.pid
+ cp ./pihole-FTL /home/pihole/pihole-FTL
+ chmod +x /home/pihole/pihole-FTL
+ # Note: We cannot add CAP_NET_RAW and CAP_NET_ADMIN at this point
+-setcap CAP_NET_BIND_SERVICE+eip /home/pihole/pihole-FTL
++if ${FREEBSD}; then
++  # No file capabilities: open the privileged ports to every user instead
++  sysctl net.inet.ip.portrange.reservedhigh=0
++else
++  setcap CAP_NET_BIND_SERVICE+eip /home/pihole/pihole-FTL
++fi
+ 
+ # Prepare gravity database
+ ./pihole-FTL sqlite3 /etc/pihole/gravity.db < test/gravity.db.sql
+@@ -64,6 +118,8 @@ chmod 0666 /etc/pihole/cli_pw
+ chown pihole:pihole /etc/pihole/cli_pw
+ sleep 600 < /etc/pihole/cli_pw > /dev/null 2>&1 &
+ echo $! > /tmp/cli_pw_holder.pid
++# Without /proc/<pid>/fd, a second name for the stale file shows the same
++ln -f /etc/pihole/cli_pw /etc/cli_pw.stale
+ 
+ # Prepare 01-pihole-tests.conf
+ mkdir -p /etc/dnsmasq.d
+@@ -94,7 +150,12 @@ export FTLCONF_MISC_CHECK_SHMEM=91
+ export FTLCONF_files_pcap=$'\001./test/pcap'
+ 
+ # Start FTL
+-if ! su pihole -s /bin/sh -c /home/pihole/pihole-FTL; then
++if ${FREEBSD}; then
++  ftl_start=(su -m pihole -c /home/pihole/pihole-FTL)
++else
++  ftl_start=(su pihole -s /bin/sh -c /home/pihole/pihole-FTL)
++fi
++if ! "${ftl_start[@]}"; then
+   echo "pihole-FTL failed to start"
+   exit 1
+ fi
+diff --git test/test_final.bats test/test_final.bats
+index 6a1c13f9..c436898b 100644
+--- test/test_final.bats
++++ test/test_final.bats
+@@ -357,7 +357,7 @@ load 'bats_helper.bash'
+   assert_success
+ 
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c "su pihole -s /bin/sh -c 'TZ=${tz} /home/pihole/pihole-FTL'"
++  run bash -c "as_pihole 'TZ=${tz} /home/pihole/pihole-FTL'"
+   assert_success
+   run bash -c "./pihole-FTL wait-for ' MB, deleted ' /var/log/pihole/FTL.log 60 $logsize_restart"
+   logged=$status
+@@ -394,7 +394,7 @@ load 'bats_helper.bash'
+   # then move the new one in. It carries the same timestamp here, so only the
+   # file itself tells the two apart
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c 'su pihole -s /bin/sh -c /home/pihole/pihole-FTL'
++  run bash -c 'as_pihole /home/pihole/pihole-FTL'
+   assert_success
+   run bash -c "./pihole-FTL wait-for 'deny regex for' /var/log/pihole/FTL.log 30 $logsize_restart"
+   assert_success
+@@ -428,11 +428,15 @@ load 'bats_helper.bash'
+   # Start FTL afresh so no record exists yet, and ask for a non-canonical
+   # spelling first: the record must still answer the canonical name. Further
+   # spellings (leading zeros, extra leading labels) must not add records
+-  addr=$(ip -4 -o address show scope global | awk '{print $4}' | cut -d/ -f1 | head -n1)
++  if [[ "$(uname -s)" == "FreeBSD" ]]; then
++    addr=$(ifconfig -a inet | awk '$1 == "inet" && $2 !~ /^127\./ { print $2; exit }')
++  else
++    addr=$(ip -4 -o address show scope global | awk '{print $4}' | cut -d/ -f1 | head -n1)
++  fi
+   [ -n "${addr}" ]
+   IFS=. read -r a b c d <<< "${addr}"
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c 'su pihole -s /bin/sh -c /home/pihole/pihole-FTL'
++  run bash -c 'as_pihole /home/pihole/pihole-FTL'
+   assert_success
+   run bash -c "./pihole-FTL wait-for ' -> Known forward destinations' /var/log/pihole/FTL.log 30 $logsize_restart"
+   assert_success
+@@ -462,7 +466,7 @@ load 'bats_helper.bash'
+ 
+ @test "Raising misc.privacylevel at runtime hides known domains and clients in the database" {
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c 'su pihole -s /bin/sh -c /home/pihole/pihole-FTL'
++  run bash -c 'as_pihole /home/pihole/pihole-FTL'
+   assert_success
+   run bash -c "./pihole-FTL wait-for ' -> Known forward destinations' /var/log/pihole/FTL.log 30 $logsize_restart"
+   assert_success
+diff --git test/test_suite.bats test/test_suite.bats
+index 081030f8..bbcb1e9d 100644
+--- test/test_suite.bats
++++ test/test_suite.bats
+@@ -28,8 +28,13 @@ setup() {
+ @test "A leftover world-readable CLI password file is replaced" {
+   # test/run.sh leaves a 0666 cli_pw behind before FTL starts and keeps it open
+   holder=$(cat /tmp/cli_pw_holder.pid)
+-  run cat "/proc/${holder}/fd/0"
++  if [[ -e "/proc/${holder}/fd/0" ]]; then
++    run cat "/proc/${holder}/fd/0"
++  else
++    run cat /etc/cli_pw.stale
++  fi
+   kill "${holder}"
++  rm -f /etc/cli_pw.stale
+   assert_output "stale"
+   run stat -c '%a' /etc/pihole/cli_pw
+   assert_output "640"
+@@ -38,7 +43,7 @@ setup() {
+ }
+ 
+ @test "Running a second instance is detected and prevented" {
+-  run bash -c 'su pihole -s /bin/sh -c "./pihole-FTL -f"'
++  run bash -c 'as_pihole "./pihole-FTL -f"'
+    assert_output --partial "CRIT: pihole-FTL is already running"
+ }
+ 
+@@ -235,8 +240,8 @@ setup() {
+   run bash -c "grep -c \"There is no record for 00:11:22:33:44:55 in the client table\" /var/log/pihole/FTL.log"
+   assert_line --index 0 "1"
+   # The query arrives on lo, which takes precedence over enp0s123 from the
+-  # network table. There is no client :lo, so the default group applies
+-  run bash -c "grep -c \"Using in-memory interface :lo of 127.0.0.6\" /var/log/pihole/FTL.log"
++  # network table. There is no client :lo (lo0 on FreeBSD), so the default group applies
++  run bash -c "grep -c \"Using in-memory interface :${LO} of 127.0.0.6\" /var/log/pihole/FTL.log"
+   assert_line --index 0 "1"
+   run bash -c "grep -c \"Found database interface 127.0.0.6 -> enp0s123\" /var/log/pihole/FTL.log"
+   assert_line --index 0 "0"
+@@ -1276,7 +1281,7 @@ setup() {
+   assert_success
+   after="$(grep -c ^ /var/log/pihole/FTL.log)"
+   run bash -c "sed -n \"${before},${after}p\" /var/log/pihole/FTL.log"
+-  assert_line --partial "**** new UDP IPv4 query[A] query \"localhost\" from lo/${ipv4}#53 "
++  assert_line --partial "**** new UDP IPv4 query[A] query \"localhost\" from ${LO}/${ipv4}#53 "
+ 
+   before="$(grep -c ^ /var/log/pihole/FTL.log)"
+   run bash -c "dig localhost +short +subnet=${ipv6}/128 +ednsopt=65001:020000000001 @127.0.0.1"
+@@ -1284,7 +1289,7 @@ setup() {
+   assert_success
+   after="$(grep -c ^ /var/log/pihole/FTL.log)"
+   run bash -c "sed -n \"${before},${after}p\" /var/log/pihole/FTL.log"
+-  assert_line --partial "**** new UDP IPv4 query[A] query \"localhost\" from lo/${ipv6}#53 "
++  assert_line --partial "**** new UDP IPv4 query[A] query \"localhost\" from ${LO}/${ipv6}#53 "
+ 
+   kill -SIGRTMIN+5 "$(cat /run/pihole-FTL.pid)"
+ 
+@@ -1320,13 +1325,18 @@ setup() {
+ 
+ @test "Local interfaces are added to the network table" {
+   # Use the first interface with a hardware address, fall back to lo
+-  iface="lo"
+-  for dir in /sys/class/net/*; do
+-    [[ "$(basename "${dir}")" != "lo" && -s "${dir}/address" ]] || continue
+-    iface="$(basename "${dir}")"
+-    break
+-  done
+-  mac="$(cat "/sys/class/net/${iface}/address")"
++  if [[ "$(uname -s)" == "FreeBSD" ]]; then
++    iface="$(ifconfig -l ether | awk '{ print $1 }')"
++    mac="$(ifconfig "${iface}" ether | awk '$1 == "ether" { print $2 }')"
++  else
++    iface="lo"
++    for dir in /sys/class/net/*; do
++      [[ "$(basename "${dir}")" != "lo" && -s "${dir}/address" ]] || continue
++      iface="$(basename "${dir}")"
++      break
++    done
++    mac="$(cat "/sys/class/net/${iface}/address")"
++  fi
+   addr="$(curl -s 127.0.0.1/api/network/interfaces | jq -r ".interfaces[] | select(.name == \"${iface}\") | .addresses[0].address")"
+   [[ -n "${mac}" && -n "${addr}" && "${addr}" != "null" ]]
+ 
+@@ -1562,7 +1572,7 @@ setup() {
+   run bash -c "sed -n \"${before},${after}p\" /var/log/pihole/FTL.log"
+ 
+   # Check for expected log lines
+-  assert_line --partial "new UDP IPv4 non-query[type=0] \"opcode\" from lo/127.0.0.1"
++  assert_line --partial "new UDP IPv4 non-query[type=0] \"opcode\" from ${LO}/127.0.0.1"
+   assert_line --partial "**** got cache reply: opcode is (null) "
+ }
+ 
+@@ -1582,7 +1592,7 @@ setup() {
+   run bash -c "sed -n \"${before},${after}p\" /var/log/pihole/FTL.log"
+ 
+   # Check for expected log lines
+-  assert_line --partial "new TCP IPv4 non-query[type=0] \"opcode\" from lo/127.0.0.1"
++  assert_line --partial "new TCP IPv4 non-query[type=0] \"opcode\" from ${LO}/127.0.0.1"
+   assert_line --partial "**** got cache reply: opcode is (null) "
+ }
+ 
+@@ -1857,7 +1867,8 @@ setup() {
+   assert_failure 3
+ 
+   run bash -c './pihole-FTL --config dns.revServers "[\"true,1.1.1.1,def,ghi\"]"'
+-  assert_line --regexp --index 0 'New dnsmasq configuration is not valid \(.+resolve at line [[:digit:]]+ of /etc/pihole/dnsmasq.conf.temp: "rev-server=1.1.1.1,def"\), config remains unchanged'
++  # The reason is gai_strerror()'s, which differs between C libraries
++  assert_line --regexp --index 0 'New dnsmasq configuration is not valid \(.+(resolve|resolve server name|not known) at line [[:digit:]]+ of /etc/pihole/dnsmasq.conf.temp: "rev-server=1.1.1.1,def"\), config remains unchanged'
+   assert_failure 3
+ 
+   run bash -c './pihole-FTL --config webserver.api.excludeClients "[\".*\",\"$$$\",\"[[[\"]"'
+@@ -1935,9 +1946,15 @@ setup() {
+ 
+ @test "Config validation: a document root that resolves to the root is rejected" {
+   # Lexically /proc/self/root is a directory of its own, but it is a link
+-  # the kernel plants to /, so it has to be judged by where it leads
+-  run bash -c './pihole-FTL --config webserver.paths.webroot /proc/self/root'
+-  assert_line --index 0 'Invalid value: webserver.paths.webroot: "/proc/self/root" resolves to "/", which must not be "/" or overlap Pi-hole'"'"'s configuration directory ("/etc/pihole")'
++  # the kernel plants to /, so it has to be judged by where it leads.
++  # Without /proc (FreeBSD) a link of our own does the same
++  rootlink=/proc/self/root
++  if [[ ! -e "${rootlink}" ]]; then
++    rootlink=/tmp/webroot-root
++    ln -sfn / "${rootlink}"
++  fi
++  run bash -c "./pihole-FTL --config webserver.paths.webroot ${rootlink}"
++  assert_line --index 0 'Invalid value: webserver.paths.webroot: "'"${rootlink}"'" resolves to "/", which must not be "/" or overlap Pi-hole'"'"'s configuration directory ("/etc/pihole")'
+   assert_failure 3
+ 
+   # A link into the configuration directory is caught the same way

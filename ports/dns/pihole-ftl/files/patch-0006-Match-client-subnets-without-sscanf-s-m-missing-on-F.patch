@@ -1,0 +1,30 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sarahmeow1986 <saretta1986@proton.me>
+Date: Thu, 22 Oct 2026 12:22:03 +0200
+Subject: [PATCH] Match client subnets without sscanf's %m, missing on FreeBSD
+
+---
+ src/database/sqlite3-ext.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git src/database/sqlite3-ext.c src/database/sqlite3-ext.c
+index 06600755..02afbafa 100644
+--- src/database/sqlite3-ext.c
++++ src/database/sqlite3-ext.c
+@@ -76,8 +76,14 @@ static void subnet_match_impl(sqlite3_context *context, int argc, sqlite3_value
+ 	// sscanf() will not overwrite the pre-defined CIDR in cidr if
+ 	// no CIDR is specified in the database
+ 	int cidr = isIPv6_DB ? 128 : 32;
+-	char *addrDB = NULL;
+-	const int rt = sscanf(addrDBcidr, "%m[^/]/%i", &addrDB, &cidr);
++	// Split "address[/cidr]" by hand: sscanf()'s %m (allocate) is not
++	// available everywhere (FreeBSD), and without it nothing would match
++	const char *slash = strchr(addrDBcidr, '/');
++	const size_t addrlen = slash != NULL ? (size_t)(slash - addrDBcidr) : strlen(addrDBcidr);
++	char *addrDB = addrlen > 0 ? strndup(addrDBcidr, addrlen) : NULL;
++	int rt = addrDB != NULL ? 1 : 0;
++	if(rt == 1 && slash != NULL && sscanf(slash + 1, "%i", &cidr) == 1)
++		rt = 2;
+ 
+ 	// Limit CIDR to valid values
+ 	if(cidr < 0 || cidr > (isIPv6_DB ? 128 : 32))

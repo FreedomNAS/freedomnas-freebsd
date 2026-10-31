@@ -1,14 +1,12 @@
 PORTNAME=	pihole
 DISTVERSION=	6.5
-PORTREVISION=	3
+PORTREVISION=	4
 CATEGORIES=	dns www
-MASTER_SITES=	https://codeberg.org/FreedomNAS/pihole-core-freebsd/archive/:core
-DISTFILES=	${CORE_COMMIT}.tar.gz:core
 DIST_SUBDIR=	${PORTNAME}
 
 MAINTAINER=	dev@freedomnas.io
 COMMENT=	Network-wide ad blocking DNS server with a web interface
-WWW=		https://codeberg.org/FreedomNAS/pihole-core-freebsd
+WWW=		https://pi-hole.net/
 
 LICENSE=	EUPL12
 
@@ -19,17 +17,20 @@ RUN_DEPENDS=	bash:shells/bash \
 		pihole-FTL:dns/pihole-ftl
 
 USE_GITHUB=	nodefault
-GH_TUPLE=	pi-hole:web:v${WEB_VERSION}:web
+GH_TUPLE=	pi-hole:pi-hole:v${DISTVERSION}:core \
+		pi-hole:web:v${WEB_VERSION}:web
 
 NO_ARCH=	yes
 NO_BUILD=	yes
 
 SUB_FILES=	pkg-install pkg-message
 
-CORE_COMMIT=	be82040c676493c428cdea09eddba3cfe998ec03
+# Upstream's release with FreedomNAS's FreeBSD changes on top, one patch per
+# change in files/ (bin/update-pihole.sh moves them to a new release)
+CORE_HASH=	f503a65d
 WEB_VERSION=	6.6.1
 
-WRKSRC=		${WRKDIR}/pihole-core-freebsd
+WRKSRC=		${WRKDIR}/pi-hole-${DISTVERSION}
 WEB_WRKSRC=	${WRKDIR}/web-${WEB_VERSION}
 
 SCRIPTS=	advanced/Scripts/*.sh advanced/Scripts/database_migration/*.sh \
@@ -64,7 +65,7 @@ do-install:
 		${WRKSRC}/advanced/Templates/gravity_copy.sql ${STAGEDIR}${DATADIR}/advanced/Templates/
 	cd ${WRKSRC}/advanced/Scripts && ${COPYTREE_SHARE} database_migration \
 		${STAGEDIR}${DATADIR}/advanced/Scripts
-	${PRINTF} 'VERSION=v${DISTVERSION}\nBRANCH=freebsd\nHASH=%.8s\n' ${CORE_COMMIT} \
+	${PRINTF} 'VERSION=v${DISTVERSION}\nBRANCH=master\nHASH=${CORE_HASH}\n' \
 		> ${STAGEDIR}${DATADIR}/.pkgversion
 	${MKDIR} ${STAGEDIR}${WWWDIR}/admin
 	cd ${WEB_WRKSRC} && ${COPYTREE_SHARE} "img scripts style vendor" ${STAGEDIR}${WWWDIR}/admin
