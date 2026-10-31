@@ -1,0 +1,215 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sarahmeow1986 <saretta1986@proton.me>
+Date: Thu, 22 Oct 2026 06:11:17 +0200
+Subject: [PATCH] Add a FreeBSD rc.d script and portable start helpers
+
+---
+ advanced/Scripts/piholeDebug.sh           |  2 +-
+ advanced/Scripts/utils.sh                 | 16 ++++++-
+ advanced/Templates/pihole-FTL-poststop.sh |  8 +++-
+ advanced/Templates/pihole-FTL-prestart.sh | 21 +++++++--
+ advanced/Templates/pihole-FTL.rcd         | 54 +++++++++++++++++++++++
+ pihole                                    | 10 ++++-
+ 6 files changed, 102 insertions(+), 9 deletions(-)
+ create mode 100644 advanced/Templates/pihole-FTL.rcd
+
+diff --git advanced/Scripts/piholeDebug.sh advanced/Scripts/piholeDebug.sh
+index d14fc171..f2edbd90 100755
+--- advanced/Scripts/piholeDebug.sh
++++ advanced/Scripts/piholeDebug.sh
+@@ -96,7 +96,7 @@ PIHOLE_FTL_DB_FILE="$(get_ftl_conf_value "files.database")"
+ 
+ PIHOLE_COMMAND="${BIN_DIRECTORY}/pihole"
+ 
+-FTL_PID="/run/pihole-FTL.pid" # Hardcoded PID path — see GHSA-6w8x-p785-6pm4
++FTL_PID="$(ftl_pid_file)" # Hardcoded PID path — see GHSA-6w8x-p785-6pm4
+ 
+ PIHOLE_LOG="${LOG_DIRECTORY}/pihole.log"
+ PIHOLE_LOG_GZIPS="${LOG_DIRECTORY}/pihole.log.[0-9].*"
+diff --git advanced/Scripts/utils.sh advanced/Scripts/utils.sh
+index 5dfdd74e..972d6b52 100755
+--- advanced/Scripts/utils.sh
++++ advanced/Scripts/utils.sh
+@@ -95,11 +95,23 @@ loadVersionFile() {
+   done < "${file}"
+ }
+ 
++#######################
++# prints the path of FTL's PID file, hardcoded per platform as FTL itself
++# hardcodes it — see GHSA-6w8x-p785-6pm4
++#######################
++ftl_pid_file() {
++    case "$(uname -s)" in
++        Linux) echo "/run/pihole-FTL.pid" ;;
++        *) echo "/var/run/pihole-FTL.pid" ;;
++    esac
++}
++
+ #######################
+ # returns FTL's PID based on the content of the pihole-FTL.pid file
+ #######################
+ getFTLPID() {
+-    local FTL_PID_FILE="/run/pihole-FTL.pid"  # hardcoded — see GHSA-6w8x-p785-6pm4
++    local FTL_PID_FILE
++    FTL_PID_FILE="$(ftl_pid_file)"
+     local FTL_PID
+ 
+     if [ -s "${FTL_PID_FILE}" ]; then
+@@ -108,7 +120,7 @@ getFTLPID() {
+         # The pihole user owns this file, so only accept a plain number naming a running pihole-FTL
+         case "${FTL_PID}" in
+             ''|*[!0-9]*) unset FTL_PID ;;
+-            *) [ "$(cat "/proc/${FTL_PID}/comm" 2>/dev/null)" = "pihole-FTL" ] || unset FTL_PID ;;
++            *) [ "$(cat "/proc/${FTL_PID}/comm" 2>/dev/null || ps -o comm= -p "${FTL_PID}" 2>/dev/null)" = "pihole-FTL" ] || unset FTL_PID ;;
+         esac
+     fi
+ 
+diff --git advanced/Templates/pihole-FTL-poststop.sh advanced/Templates/pihole-FTL-poststop.sh
+index af1e00d1..f892be4e 100755
+--- advanced/Templates/pihole-FTL-poststop.sh
++++ advanced/Templates/pihole-FTL-poststop.sh
+@@ -2,4 +2,10 @@
+ 
+ # Cleanup
+ # Hardcoded PID path — see GHSA-6w8x-p785-6pm4
+-rm -f /run/pihole/FTL.sock /dev/shm/FTL-* /run/pihole-FTL.pid
++if [ "$(uname -s)" = Linux ]; then
++    rm -f /run/pihole/FTL.sock /dev/shm/FTL-* /run/pihole-FTL.pid
++else
++    # POSIX shared memory lives outside the file system here; FTL unlinks
++    # its own objects when it exits
++    rm -f /var/run/pihole-FTL.pid
++fi
+diff --git advanced/Templates/pihole-FTL-prestart.sh advanced/Templates/pihole-FTL-prestart.sh
+index dda59c26..7960480c 100755
+--- advanced/Templates/pihole-FTL-prestart.sh
++++ advanced/Templates/pihole-FTL-prestart.sh
+@@ -1,5 +1,16 @@
+ #!/usr/bin/env sh
+ 
++# Run a command as the pihole user, whose login shell is nologin. Linux su
++# takes the shell with -s; BSD su uses -s for something else, and -m keeps
++# root's own shell instead
++as_pihole() {
++    if [ "$(uname -s)" = Linux ]; then
++        su -s /bin/sh pihole -c "$1"
++    else
++        su -m pihole -c "$1"
++    fi
++}
++
+ # Ensure that permissions are set so that pihole-FTL can edit all necessary files
+ mkdir -p /var/log/pihole
+ chown -R pihole:pihole /etc/pihole/ /var/log/pihole/
+@@ -17,7 +28,7 @@ chown -R pihole:pihole /etc/pihole/ /var/log/pihole/
+ # the pihole user do it: it owns everything below these directories, and a
+ # symlink pointing anywhere else only results in a permission error.
+ # A failure here is deliberately non-fatal so it can never prevent FTL starting.
+-su -s /bin/sh pihole -c '
++as_pihole '
+     find /etc/pihole/ /var/log/pihole/ -type d -exec chmod 0755 {} +
+     find /etc/pihole/ /var/log/pihole/ -type f ! \( -name "*.pem" -o -name "*.crt" \) -exec chmod 0640 {} +
+     find /etc/pihole/ -type f \( -name "*.pem" -o -name "*.crt" \) -exec chmod 0600 {} +
+@@ -37,8 +48,12 @@ su -s /bin/sh pihole -c '
+ # commands simply fail with a permission error and the target is left untouched.
+ # A failure here is deliberately non-fatal so it can never prevent FTL starting.
+ # su is needed to change user; both files are handled in a single call.
+-su -s /bin/sh pihole -c 'touch /etc/pihole/versions /etc/pihole/dhcp.leases && chmod 0644 /etc/pihole/versions /etc/pihole/dhcp.leases' || true
++as_pihole 'touch /etc/pihole/versions /etc/pihole/dhcp.leases && chmod 0644 /etc/pihole/versions /etc/pihole/dhcp.leases' || true
+ 
+ # Touch files to ensure they exist (create if non-existing, preserve if existing)
+ # Hardcoded PID path — see GHSA-6w8x-p785-6pm4
+-[ -f /run/pihole-FTL.pid ] || install -D -m 644 -o pihole -g pihole /dev/null /run/pihole-FTL.pid
++if [ "$(uname -s)" = Linux ]; then
++    [ -f /run/pihole-FTL.pid ] || install -D -m 644 -o pihole -g pihole /dev/null /run/pihole-FTL.pid
++else
++    [ -f /var/run/pihole-FTL.pid ] || install -m 644 -o pihole -g pihole /dev/null /var/run/pihole-FTL.pid
++fi
+diff --git advanced/Templates/pihole-FTL.rcd advanced/Templates/pihole-FTL.rcd
+new file mode 100644
+index 00000000..0e9afe0c
+--- /dev/null
++++ advanced/Templates/pihole-FTL.rcd
+@@ -0,0 +1,54 @@
++#!/bin/sh
++# shellcheck disable=SC2034,SC1091
++
++# PROVIDE: pihole_ftl
++# REQUIRE: NETWORKING syslogd
++# KEYWORD: shutdown
++#
++# Add the following to /etc/rc.conf to start pihole-FTL at boot:
++#
++# pihole_ftl_enable (bool):  Set to YES to enable pihole-FTL.
++#                            Default: NO
++# pihole_ftl_user (str):     User pihole-FTL runs as.
++#                            Default: root
++#
++# FreeBSD has no per-process capabilities, so a user other than root can
++# bind neither DNS port 53 nor a web server port below 1024. Run as pihole
++# only with unprivileged ports (dns.port, webserver.port in pihole.toml,
++# for instance behind a jail's port redirection) or with mac_portacl(4)
++# allowing that user these ports.
++
++. /etc/rc.subr
++
++name=pihole_ftl
++rcvar=pihole_ftl_enable
++
++load_rc_config $name
++
++: "${pihole_ftl_enable:=NO}"
++: "${pihole_ftl_user:=root}"
++
++PI_HOLE_SCRIPT_DIR="/opt/pihole"
++
++command="/usr/local/bin/pihole-FTL"
++procname="${command}"
++# Hardcoded PID path, the one FTL writes itself — see GHSA-6w8x-p785-6pm4
++pidfile="/var/run/pihole-FTL.pid"
++extra_commands="reload"
++start_precmd="${name}_prestart"
++stop_postcmd="${name}_poststop"
++
++pihole_ftl_prestart()
++{
++	sh "${PI_HOLE_SCRIPT_DIR}/pihole-FTL-prestart.sh"
++	if [ "${pihole_ftl_user}" != root ]; then
++		chown "${pihole_ftl_user}" "${pidfile}"
++	fi
++}
++
++pihole_ftl_poststop()
++{
++	sh "${PI_HOLE_SCRIPT_DIR}/pihole-FTL-poststop.sh"
++}
++
++run_rc_command "$1"
+diff --git pihole pihole
+index a0d0e1ef..f0d6dc59 100755
+--- pihole
++++ pihole
+@@ -304,7 +304,14 @@ analyze_ports() {
+   # function is getting called
+   # Check individual address family/protocol combinations
+   # For a healthy Pi-hole, they should all be up (nothing printed)
+-  lv4="$(ss --ipv4 --listening --numeric --tcp --udp src :${port})"
++  if command -v ss >/dev/null 2>&1; then
++    lv4="$(ss --ipv4 --listening --numeric --tcp --udp src :${port})"
++    lv6="$(ss --ipv6 --listening --numeric --tcp --udp src :${port})"
++  else
++    # BSD sockstat names the protocols udp4, tcp6 and so on
++    lv4="$(sockstat -4 -l -p "${port}" | awk 'NR > 1 {sub(/[46]$/, "", $5); print $5 " "}')"
++    lv6="$(sockstat -6 -l -p "${port}" | awk 'NR > 1 {sub(/[46]$/, "", $5); print $5 " "}')"
++  fi
+   if grep -q "udp " <<< "${lv4}"; then
+       echo -e "     ${TICK} UDP (IPv4)"
+   else
+@@ -315,7 +322,6 @@ analyze_ports() {
+   else
+       echo -e "     ${CROSS} TCP (IPv4)"
+   fi
+-  lv6="$(ss --ipv6 --listening --numeric --tcp --udp src :${port})"
+   if grep -q "udp " <<< "${lv6}"; then
+       echo -e "     ${TICK} UDP (IPv6)"
+   else

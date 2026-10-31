@@ -1,0 +1,24 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sarahmeow1986 <saretta1986@proton.me>
+Date: Thu, 22 Oct 2026 12:22:03 +0200
+Subject: [PATCH] Declare environ only where the C library does not
+
+---
+ src/config/env.c | 3 +++
+ 1 file changed, 3 insertions(+)
+
+diff --git src/config/env.c src/config/env.c
+index 0d6f53cf..6420b40f 100644
+--- src/config/env.c
++++ src/config/env.c
+@@ -38,7 +38,10 @@ struct env_item
+ 
+ static struct env_item *env_list = NULL;
+ 
++#ifndef __linux__
++// Declared by <unistd.h> on Linux (_GNU_SOURCE), not on FreeBSD
+ extern char **environ;
++#endif
+ 
+ void getEnvVars(void)
+ {

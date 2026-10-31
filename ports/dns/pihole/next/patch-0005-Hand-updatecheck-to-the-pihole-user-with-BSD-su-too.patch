@@ -1,0 +1,28 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sarahmeow1986 <saretta1986@proton.me>
+Date: Thu, 22 Oct 2026 06:23:24 +0200
+Subject: [PATCH] Hand updatecheck to the pihole user with BSD su too
+
+---
+ advanced/Scripts/updatecheck.sh | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git advanced/Scripts/updatecheck.sh advanced/Scripts/updatecheck.sh
+index 494425a4..28158478 100755
+--- advanced/Scripts/updatecheck.sh
++++ advanced/Scripts/updatecheck.sh
+@@ -26,7 +26,13 @@ if [[ "$(id -u)" -eq 0 ]]; then
+     # Only the literal "reboot" argument (see below) is passed on
+     reboot_arg=""
+     [[ "${1:-}" == "reboot" ]] && reboot_arg="reboot"
+-    su -s /bin/sh pihole -c "/opt/pihole/updatecheck.sh ${reboot_arg}"
++    # pihole's login shell is nologin: Linux su takes another one with -s,
++    # BSD su (where -s means something else) keeps root's with -m
++    if [[ "$(uname -s)" == "Linux" ]]; then
++        su -s /bin/sh pihole -c "/opt/pihole/updatecheck.sh ${reboot_arg}"
++    else
++        su -m pihole -c "/opt/pihole/updatecheck.sh ${reboot_arg}"
++    fi
+     exit "$?"
+ fi
+ 

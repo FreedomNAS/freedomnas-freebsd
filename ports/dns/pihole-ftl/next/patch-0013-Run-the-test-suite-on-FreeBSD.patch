@@ -1,0 +1,768 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sarahmeow1986 <saretta1986@proton.me>
+Date: Thu, 22 Oct 2026 12:22:03 +0200
+Subject: [PATCH] Run the test suite on FreeBSD
+
+---
+ test/api/test_api.py           | 15 +++++--
+ test/bats_helper.bash          | 43 ++++++++++++++++++
+ test/dotdoh_server.bats        |  6 ++-
+ test/hostnames.sh              |  9 +++-
+ test/pdns/setup.sh             | 18 +++++++-
+ test/ptr_response_regression.c |  4 ++
+ test/run.sh                    | 80 +++++++++++++++++++++++++++++++---
+ test/test_final.bats           | 48 ++++++++++----------
+ test/test_suite.bats           | 61 ++++++++++++++++----------
+ test/toml_lock_fork.py         | 22 ++++++++++
+ test/webserver_tls_ports.bats  |  2 +-
+ 11 files changed, 250 insertions(+), 58 deletions(-)
+
+diff --git test/api/test_api.py test/api/test_api.py
+index 0e1414a1..196e7b71 100644
+--- test/api/test_api.py
++++ test/api/test_api.py
+@@ -11,7 +11,9 @@ Usage:
+ 
+ import itertools
+ import json
++import os
+ import re
++import sys
+ from urllib.parse import quote
+ 
+ import pytest
+@@ -1196,9 +1198,13 @@ class TestInfo:
+         assert "uptime" in s
+         assert s["memory"]["ram"]["total"] > 0
+         # All CPUs present, not only those in FTL's affinity mask
+-        with open("/sys/devices/system/cpu/present") as f:
+-            ranges = [r.split("-") for r in f.read().strip().split(",")]
+-        assert s["cpu"]["nprocs"] == sum(int(r[-1]) - int(r[0]) + 1 for r in ranges)
++        if os.path.exists("/sys/devices/system/cpu/present"):
++            with open("/sys/devices/system/cpu/present") as f:
++                ranges = [r.split("-") for r in f.read().strip().split(",")]
++            assert s["cpu"]["nprocs"] == sum(int(r[-1]) - int(r[0]) + 1 for r in ranges)
++        else:
++            # No sysfs (FreeBSD): hw.ncpu
++            assert s["cpu"]["nprocs"] == os.cpu_count()
+         assert "ftl" in s
+         assert "%mem" in s["ftl"]
+         assert "%cpu" in s["ftl"]
+@@ -1240,7 +1246,8 @@ class TestNetwork:
+         data = _j(api_session.get(f"{FTL_URL}/api/network/interfaces", timeout=5))
+         ifaces = data["interfaces"]
+         names = [i["name"] for i in ifaces]
+-        assert "lo" in names, json.dumps(names, indent=2)
++        loopback = "lo0" if sys.platform.startswith("freebsd") else "lo"
++        assert loopback in names, json.dumps(names, indent=2)
+ 
+ 
+ # ---------------------------------------------------------------------------
+diff --git test/bats_helper.bash test/bats_helper.bash
+index 24c93d48..859932ef 100644
+--- test/bats_helper.bash
++++ test/bats_helper.bash
+@@ -21,3 +21,46 @@ bats::on_failure() {
+     printf "═══════════════════════════════════════════════════════════════════════════════\n"
+     printf "\n"
+ }
++
++# Runs a shell command as user pihole. FreeBSD's su has no -s (and -c names a
++# login class there), -m keeps the caller's shell instead
++as_pihole() {
++    if [[ "$(uname -s)" == "FreeBSD" ]]; then
++        su -m pihole -c "$1"
++    else
++        su pihole -s /bin/sh -c "$1"
++    fi
++}
++export -f as_pihole
++
++# Name of the loopback interface
++LO="lo"
++[[ "$(uname -s)" == "FreeBSD" ]] && LO="lo0"
++export LO
++
++# The command line of process $1, its arguments separated by spaces
++proc_cmdline() {
++    if [[ -r "/proc/$1/cmdline" ]]; then
++        tr '\0' ' ' < "/proc/$1/cmdline"
++    else
++        ps -ww -o args= -p "$1"
++    fi
++}
++export -f proc_cmdline
++
++# Is a TCP socket listening on port $1?
++tcp_listening() {
++    if [[ "$(uname -s)" == "FreeBSD" ]]; then
++        sockstat -46lq -P tcp | awk '{ print $6 }' | grep -q ":$1\$"
++    else
++        netstat -ltn | grep -q ":$1 "
++    fi
++}
++export -f tcp_listening
++
++# Settings for the tests that name clients through dns.hosts. FreeBSD only sends
++# from the client addresses lo0 has, which makes them local, and FTL answers the
++# PTR query of a local address with pi.hole (dns.piholePTR) before dns.hosts
++CLIENT_NAMES_ENV=""
++[[ "$(uname -s)" == "FreeBSD" ]] && CLIENT_NAMES_ENV="FTLCONF_dns_piholePTR=NONE"
++export CLIENT_NAMES_ENV
+diff --git test/dotdoh_server.bats test/dotdoh_server.bats
+index c91da297..7fe1b65c 100644
+--- test/dotdoh_server.bats
++++ test/dotdoh_server.bats
+@@ -628,7 +628,11 @@ setup_file() {
+ 
+ @test "dotdoh-server: pi.hole over DoQ resolves to an address the client can reach" {
+   python3 -c 'import aioquic' 2>/dev/null || skip "aioquic not installed"
+-  run python3 test/dotdoh_query.py doq 127.0.0.1 853 pi.hole "$CLIENT" 127.0.0.1
++  # The route back to a client on another loopback address starts from
++  # 127.0.0.1 on Linux, from that address itself on FreeBSD
++  local reached=127.0.0.1
++  [[ "$(uname -s)" == "FreeBSD" ]] && reached="$CLIENT"
++  run python3 test/dotdoh_query.py doq 127.0.0.1 853 pi.hole "$CLIENT" "$reached"
+   assert_output "OK"
+ }
+ 
+diff --git test/hostnames.sh test/hostnames.sh
+index 9e341f7e..37017202 100644
+--- test/hostnames.sh
++++ test/hostnames.sh
+@@ -9,7 +9,14 @@ getIPs() {
+     local protocol
+     protocol=$2
+ 
+-    addresses="$(ip address show | sed "/${addr_type} /!d;s/^.*${addr_type} //g;s/\/.*$//g;")"
++    if [[ "$(uname -s)" == "FreeBSD" ]]; then
++        # Leave out 127.0.0.2 and up, which only stand in for the loopback
++        # network Linux answers on as a whole (test/run.sh), and link-local
++        # addresses, which come with a %scope
++        addresses="$(ifconfig -a "${addr_type}" | awk -v t="${addr_type}" '$1 == t && $2 !~ /^127\.0\.0\.([2-9]|[1-9][0-9]+)$/ && $2 !~ /%/ { print $2 }')"
++    else
++        addresses="$(ip address show | sed "/${addr_type} /!d;s/^.*${addr_type} //g;s/\/.*$//g;")"
++    fi
+     if [ -n "${addresses}" ]; then
+         while IFS= read -r addr ; do
+             # Check if Pi-hole can use itself to block a domain
+diff --git test/pdns/setup.sh test/pdns/setup.sh
+index b242a535..4c8b75d6 100644
+--- test/pdns/setup.sh
++++ test/pdns/setup.sh
+@@ -10,7 +10,12 @@ mkdir -p /var/lib/powerdns/
+ rm -f /var/lib/powerdns/pdns.sqlite3*
+ 
+ # Install config files
+-if [ -d /etc/powerdns ]; then
++if [ -d /usr/local/etc/pdns ]; then
++  # FreeBSD; the recursor's Lua script below still goes to /etc/pdns
++  cp test/pdns/pdns.conf /usr/local/etc/pdns/pdns.conf
++  RECURSOR_CONF=/usr/local/etc/pdns/recursor.conf
++  mkdir -p /etc/pdns
++elif [ -d /etc/powerdns ]; then
+   # Debian
+   cp test/pdns/pdns.conf /etc/powerdns/pdns.conf
+   RECURSOR_CONF=/etc/powerdns/recursor.conf
+@@ -38,6 +43,9 @@ if [ -f /usr/share/doc/pdns-backend-sqlite3/schema.sqlite3.sql ]; then
+ elif [ -f /usr/share/doc/pdns/schema.sqlite3.sql ]; then
+   # Alpine
+   ./pihole-FTL sqlite3 /var/lib/powerdns/pdns.sqlite3 < /usr/share/doc/pdns/schema.sqlite3.sql
++elif [ -f /usr/local/share/doc/pdns/schema.sqlite3.sql ]; then
++  # FreeBSD
++  ./pihole-FTL sqlite3 /var/lib/powerdns/pdns.sqlite3 < /usr/local/share/doc/pdns/schema.sqlite3.sql
+ else
+   echo "Error: powerDNS SQL schema not found"
+   exit 1
+@@ -235,7 +243,7 @@ echo "********* Done installing PowerDNS configuration **********"
+ for proc in pdns_server pdns_recursor; do
+   killall "$proc" 2> /dev/null || true
+   for _ in 1 2 3 4 5 6 7 8 9 10; do
+-    pidof "$proc" > /dev/null 2>&1 || break
++    pgrep -x "$proc" > /dev/null 2>&1 || break
+     sleep 0.2
+   done
+   killall -9 "$proc" 2> /dev/null || true
+@@ -262,6 +270,12 @@ wait_for_pdns() {
+   return 1
+ }
+ 
++# The FreeBSD package runs the server as user pdns, which has to be able to
++# write its zone database
++if [ "$(uname -s)" = "FreeBSD" ]; then
++  chown -R pdns:pdns /var/lib/powerdns
++fi
++
+ # Start authoritative pdns_server and wait for it to accept queries on
+ # its configured port (5554) before continuing.
+ pdns_server --daemon
+diff --git test/ptr_response_regression.c test/ptr_response_regression.c
+index 33cb2c5c..4d71e782 100644
+--- test/ptr_response_regression.c
++++ test/ptr_response_regression.c
+@@ -3,6 +3,10 @@
+ #include <arpa/inet.h>
+ #include <errno.h>
+ #include <netinet/in.h>
++// Not part of POSIX, so <netinet/in.h> may hide it under _POSIX_C_SOURCE
++#ifndef INADDR_LOOPBACK
++#define INADDR_LOOPBACK 0x7f000001
++#endif
+ #include <pthread.h>
+ #include <stdarg.h>
+ #include <stdbool.h>
+diff --git test/run.sh test/run.sh
+index 2ca1af37..d4133ff7 100755
+--- test/run.sh
++++ test/run.sh
+@@ -6,14 +6,60 @@ if [[ ${TEST} == "false" ]]; then
+   exit 0
+ fi
+ 
++FREEBSD=false
++[[ "$(uname -s)" == "FreeBSD" ]] && FREEBSD=true
++
+ # Create pihole user if it does not exist
+ if ! id -u pihole &> /dev/null; then
+-  useradd -m -s /usr/sbin/nologin pihole
++  if ${FREEBSD}; then
++    pw useradd pihole -m -s /usr/sbin/nologin
++  else
++    useradd -m -s /usr/sbin/nologin pihole
++  fi
++fi
++
++# FTL keeps its PID file in /var/run on FreeBSD, the tests look in /run
++if ${FREEBSD} && [[ ! -e /run ]]; then
++  ln -s /var/run /run
++fi
++
++if ${FREEBSD}; then
++  # Linux answers on all of 127.0.0.0/8, FreeBSD only on the addresses
++  # lo0 has; the tests act as clients 127.0.0.2 and up (more below, for
++  # test_final only: FTL looks up the name of every local address)
++  for i in $(seq 2 63); do
++    ifconfig lo0 inet "127.0.0.${i}/32" alias 2> /dev/null
++  done
++  # The tests use GNU stat, date, touch and sed (coreutils and gsed packages)
++  gnubin="$(mktemp -d)"
++  ln -s /usr/local/bin/gnustat "${gnubin}/stat"
++  for tool in date touch sed; do
++    ln -s "/usr/local/bin/g${tool}" "${gnubin}/${tool}"
++  done
++  # Newer dig prints "; (1 server found)" after its header, which shifts the
++  # line numbers the tests check
++  printf '#!/usr/bin/env bash\nset -o pipefail\n/usr/local/bin/dig "$@" | sed "/^; ([0-9]* servers* found)$/d"\n' > "${gnubin}/dig"
++  chmod +x "${gnubin}/dig"
++  export PATH="${gnubin}:${PATH}"
++
++  # bash knows no real-time signals here, neither by name nor by number:
++  # hand those to kill(1) for every test
++  FTL_SIGRTMIN="$(./pihole-FTL sigrtmin)"
++  export FTL_SIGRTMIN
++  kill() {
++    if [[ "${1}" =~ ^-SIGRTMIN(\+([0-9]+))?$ ]]; then
++      shift
++      /bin/kill -"$((FTL_SIGRTMIN + ${BASH_REMATCH[2]:-0}))" "$@"
++    else
++      builtin kill "$@"
++    fi
++  }
++  export -f kill
+ fi
+ 
+ # Kill possibly running pihole-FTL process
+-while pidof -s pihole-FTL > /dev/null; do
+-  pid="$(pidof -s pihole-FTL)"
++while pgrep -x pihole-FTL > /dev/null; do
++  pid="$(pgrep -x pihole-FTL | head -n 1)"
+   echo "Terminating running pihole-FTL process with PID ${pid}"
+   kill "$pid"
+   sleep 1
+@@ -21,6 +67,10 @@ done
+ 
+ # Clean up possible old files from earlier test runs
+ rm -rf /etc/pihole /etc/dnsmasq.d /var/log/pihole /dev/shm/FTL-*
++if ${FREEBSD}; then
++  # POSIX shared memory is not a file system there
++  posixshmcontrol ls | awk '$NF ~ /^\/FTL-/ { print $NF }' | xargs -r posixshmcontrol rm
++fi
+ rm -f /tmp/dnsmasq_warnings /tmp/ftl_test_*.json
+ 
+ # Create necessary directories and files
+@@ -37,7 +87,12 @@ chown pihole:pihole /run/pihole-FTL.pid
+ cp ./pihole-FTL /home/pihole/pihole-FTL
+ chmod +x /home/pihole/pihole-FTL
+ # Note: We cannot add CAP_NET_RAW and CAP_NET_ADMIN at this point
+-setcap CAP_NET_BIND_SERVICE+eip /home/pihole/pihole-FTL
++if ${FREEBSD}; then
++  # No file capabilities: open the privileged ports to every user instead
++  sysctl net.inet.ip.portrange.reservedhigh=0
++else
++  setcap CAP_NET_BIND_SERVICE+eip /home/pihole/pihole-FTL
++fi
+ 
+ # Prepare gravity database
+ ./pihole-FTL sqlite3 /etc/pihole/gravity.db < test/gravity.db.sql
+@@ -64,6 +119,8 @@ chmod 0666 /etc/pihole/cli_pw
+ chown pihole:pihole /etc/pihole/cli_pw
+ sleep 600 < /etc/pihole/cli_pw > /dev/null 2>&1 &
+ echo $! > /tmp/cli_pw_holder.pid
++# Without /proc/<pid>/fd, a second name for the stale file shows the same
++ln -f /etc/pihole/cli_pw /etc/cli_pw.stale
+ 
+ # Prepare 01-pihole-tests.conf
+ mkdir -p /etc/dnsmasq.d
+@@ -122,7 +179,12 @@ export FTLCONF_MISC_CHECK_SHMEM=91
+ export FTLCONF_files_pcap=$'\001./test/pcap'
+ 
+ # Start FTL
+-if ! su pihole -s /bin/sh -c /home/pihole/pihole-FTL; then
++if ${FREEBSD}; then
++  ftl_start=(su -m pihole -c /home/pihole/pihole-FTL)
++else
++  ftl_start=(su pihole -s /bin/sh -c /home/pihole/pihole-FTL)
++fi
++if ! "${ftl_start[@]}"; then
+   echo "pihole-FTL failed to start"
+   exit 1
+ fi
+@@ -231,6 +293,14 @@ fi
+ # Run final BATS suite — log validation and FTL termination
+ # This runs after both test_suite.bats and pytest to catch any
+ # unexpected log messages from the entire run, then terminates FTL.
++# test_final also acts as clients 127.0.0.77 and .78, and 127.0.2.1 to .50 and
++# 127.0.3.1 to .50 for the clients array
++if ${FREEBSD}; then
++  for addr in 127.0.0.77 127.0.0.78 $(seq -f "127.0.2.%g" 1 50) $(seq -f "127.0.3.%g" 1 50); do
++    ifconfig lo0 inet "${addr}/32" alias 2> /dev/null
++  done
++fi
++
+ echo ""
+ echo "Running final log validation..."
+ $BATS -p "test/test_final.bats"
+diff --git test/test_final.bats test/test_final.bats
+index 077a5d4d..a1d36b21 100644
+--- test/test_final.bats
++++ test/test_final.bats
+@@ -148,7 +148,7 @@ load 'bats_helper.bash'
+   logsize_before=$(stat -c%s /var/log/pihole/FTL.log)
+   dig +short +tries=1 +time=2 -b 127.0.0.33 alias-lookup.ftl @127.0.0.1 > /dev/null
+   lookups="$(tail -c +$((logsize_before + 1)) /var/log/pihole/FTL.log | grep -c 'Looking for the alias-client for client 127.0.0.33' || true)"
+-  queries="$(tail -c +$((logsize_before + 1)) /var/log/pihole/FTL.log | grep -c 'query "alias-lookup.ftl" from lo/127.0.0.33#' || true)"
++  queries="$(tail -c +$((logsize_before + 1)) /var/log/pihole/FTL.log | grep -c "query \"alias-lookup.ftl\" from ${LO}/127.0.0.33#" || true)"
+ 
+   ./pihole-FTL sqlite3 /etc/pihole/pihole-FTL.db ".timeout 5000" "${saved}"
+   logsize_before=$(stat -c%s /var/log/pihole/FTL.log)
+@@ -537,7 +537,7 @@ first_start_ftl() {
+   cp -p /etc/pihole/dnsmasq.conf /etc/pihole/hosts/custom.list "${first_start}/suite/" || true
+   unset "${!FTLCONF_@}"
+   first_start_cli="$(FTLCONF_dns_port=5397 ./pihole-FTL --config dns.port 2> /dev/null || true)"
+-  su pihole -s /bin/sh -c "FTLCONF_files_log_ftl=${first_start}/FTL.log FTLCONF_files_log_webserver=${first_start}/webserver.log FTLCONF_files_log_dnsmasq=${first_start}/pihole.log FTLCONF_files_database=${first_start}/pihole-FTL.db FTLCONF_dns_port=5397 FTLCONF_webserver_port=127.0.0.1:8097 FTLCONF_misc_etc_dnsmasq_d=false FTLCONF_ntp_ipv4_active=false FTLCONF_ntp_ipv6_active=false FTLCONF_ntp_sync_active=false $1 /home/pihole/pihole-FTL" || true
++  as_pihole "FTLCONF_files_log_ftl=${first_start}/FTL.log FTLCONF_files_log_webserver=${first_start}/webserver.log FTLCONF_files_log_dnsmasq=${first_start}/pihole.log FTLCONF_files_database=${first_start}/pihole-FTL.db FTLCONF_dns_port=5397 FTLCONF_webserver_port=127.0.0.1:8097 FTLCONF_misc_etc_dnsmasq_d=false FTLCONF_ntp_ipv4_active=false FTLCONF_ntp_ipv6_active=false FTLCONF_ntp_sync_active=false $1 /home/pihole/pihole-FTL" || true
+   ./pihole-FTL wait-for ' -> Known forward destinations' "${first_start}/FTL.log" 60 0 > /dev/null || true
+   for i in $(seq 1 60); do
+     curl -s -f -m 1 -o /dev/null http://127.0.0.1:8097/api/config/dns/port && break
+@@ -624,7 +624,7 @@ first_start_stop() {
+   assert_success
+ 
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c "su pihole -s /bin/sh -c 'TZ=${tz} /home/pihole/pihole-FTL'"
++  run bash -c "as_pihole 'TZ=${tz} /home/pihole/pihole-FTL'"
+   assert_success
+   run bash -c "./pihole-FTL wait-for ' MB, deleted ' /var/log/pihole/FTL.log 60 $logsize_restart"
+   logged=$status
+@@ -660,7 +660,7 @@ first_start_stop() {
+   # Restart FTL without importing the history. New domains must continue the
+   # IDs of domain_by_id on disk instead of reusing those of older domains
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c 'su pihole -s /bin/sh -c "FTLCONF_database_DBimport=false /home/pihole/pihole-FTL"'
++  run bash -c 'as_pihole "FTLCONF_database_DBimport=false /home/pihole/pihole-FTL"'
+   assert_success
+   run bash -c "./pihole-FTL wait-for ' -> Known forward destinations' /var/log/pihole/FTL.log 30 $logsize_restart"
+   assert_success
+@@ -700,7 +700,7 @@ first_start_stop() {
+   totals_before=$(./pihole-FTL sqlite3 /etc/pihole/pihole-FTL.db ".timeout 5000" "SELECT (SELECT value FROM counters WHERE id = 0) || ' ' || (SELECT value FROM counters WHERE id = 1);")
+   read -r total_before blocked_before <<< "${totals_before}"
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c 'su pihole -s /bin/sh -c /home/pihole/pihole-FTL'
++  run bash -c 'as_pihole /home/pihole/pihole-FTL'
+   assert_success
+   run bash -c "./pihole-FTL wait-for ' -> Known forward destinations' /var/log/pihole/FTL.log 30 $logsize_restart"
+   assert_success
+@@ -756,7 +756,7 @@ first_start_stop() {
+ 
+   # On disk they are what the query log showed before the stop
+   logsize_import=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c 'su pihole -s /bin/sh -c /home/pihole/pihole-FTL'
++  run bash -c 'as_pihole /home/pihole/pihole-FTL'
+   assert_success
+   run bash -c "./pihole-FTL wait-for 'queries from the long-term database' /var/log/pihole/FTL.log 30 $logsize_import"
+   assert_success
+@@ -787,7 +787,7 @@ first_start_stop() {
+   # rename and more than one chunk of the export later
+   cp -p /etc/pihole/pihole.toml /tmp/pihole.toml.rename
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c 'su pihole -s /bin/sh -c "FTLCONF_database_DBimport=false FTLCONF_resolver_resolveIPv4=true FTLCONF_resolver_refreshNames=ALL /home/pihole/pihole-FTL"'
++  run bash -c 'as_pihole "${CLIENT_NAMES_ENV} FTLCONF_database_DBimport=false FTLCONF_resolver_resolveIPv4=true FTLCONF_resolver_refreshNames=ALL /home/pihole/pihole-FTL"'
+   assert_success
+   run bash -c "./pihole-FTL wait-for ' -> Known forward destinations' /var/log/pihole/FTL.log 30 $logsize_restart"
+   assert_success
+@@ -852,10 +852,10 @@ three.rename.ftl|new-rename.ftl"
+   # of its queries is left
+   # With debug.gc, each run replaces the string dump of the run before
+   rm -f /tmp/stringdump.txt
+-  su pihole -s /bin/sh -c 'echo "String dump starting at an earlier run" > /tmp/stringdump.txt'
++  as_pihole 'echo "String dump starting at an earlier run" > /tmp/stringdump.txt'
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+   logsize_dnsmasq=$(stat -c%s /var/log/pihole/pihole.log)
+-  run bash -c 'su pihole -s /bin/sh -c "FTLCONF_webserver_api_maxHistory=0 FTLCONF_database_DBinterval=45 FTLCONF_dns_rateLimit_count=250 FTLCONF_dns_rateLimit_interval=3600 /home/pihole/pihole-FTL"'
++  run bash -c 'as_pihole "FTLCONF_webserver_api_maxHistory=0 FTLCONF_database_DBinterval=45 FTLCONF_dns_rateLimit_count=250 FTLCONF_dns_rateLimit_interval=3600 /home/pihole/pihole-FTL"'
+   assert_success
+   run bash -c "./pihole-FTL wait-for ' -> Known forward destinations' /var/log/pihole/FTL.log 30 $logsize_restart"
+   assert_success
+@@ -925,11 +925,15 @@ three.rename.ftl|new-rename.ftl"
+   # Start FTL afresh so no record exists yet, and ask for a non-canonical
+   # spelling first: the record must still answer the canonical name. Further
+   # spellings (leading zeros, extra leading labels) must not add records
+-  addr=$(ip -4 -o address show scope global | awk '{print $4}' | cut -d/ -f1 | head -n1)
++  if [[ "$(uname -s)" == "FreeBSD" ]]; then
++    addr=$(ifconfig -a inet | awk '$1 == "inet" && $2 !~ /^127\./ { print $2; exit }')
++  else
++    addr=$(ip -4 -o address show scope global | awk '{print $4}' | cut -d/ -f1 | head -n1)
++  fi
+   [ -n "${addr}" ]
+   IFS=. read -r a b c d <<< "${addr}"
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c 'su pihole -s /bin/sh -c /home/pihole/pihole-FTL'
++  run bash -c 'as_pihole /home/pihole/pihole-FTL'
+   assert_success
+   run bash -c "./pihole-FTL wait-for ' -> Known forward destinations' /var/log/pihole/FTL.log 30 $logsize_restart"
+   assert_success
+@@ -959,7 +963,7 @@ three.rename.ftl|new-rename.ftl"
+ 
+ @test "Raising misc.privacylevel at runtime hides known domains and clients in the database, and stores nothing at level 3" {
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c 'su pihole -s /bin/sh -c /home/pihole/pihole-FTL'
++  run bash -c 'as_pihole /home/pihole/pihole-FTL'
+   assert_success
+   run bash -c "./pihole-FTL wait-for ' -> Known forward destinations' /var/log/pihole/FTL.log 30 $logsize_restart"
+   assert_success
+@@ -1022,7 +1026,7 @@ three.rename.ftl|new-rename.ftl"
+   # then move the new one in. It carries the same timestamp here, so only the
+   # file itself tells the two apart
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c 'su pihole -s /bin/sh -c /home/pihole/pihole-FTL'
++  run bash -c 'as_pihole /home/pihole/pihole-FTL'
+   assert_success
+   run bash -c "./pihole-FTL wait-for 'deny regex for' /var/log/pihole/FTL.log 30 $logsize_restart"
+   assert_success
+@@ -1056,7 +1060,7 @@ three.rename.ftl|new-rename.ftl"
+   # The TCP queries are created in forked TCP workers, which number them from
+   # the same counter as the main process
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c 'su pihole -s /bin/sh -c /home/pihole/pihole-FTL'
++  run bash -c 'as_pihole /home/pihole/pihole-FTL'
+   assert_success
+   run bash -c "./pihole-FTL wait-for 'queries from the long-term database' /var/log/pihole/FTL.log 30 $logsize_restart"
+   assert_success
+@@ -1082,7 +1086,7 @@ three.rename.ftl|new-rename.ftl"
+   maxid=${lines[0]}
+ 
+   logsize_import=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c 'su pihole -s /bin/sh -c /home/pihole/pihole-FTL'
++  run bash -c 'as_pihole /home/pihole/pihole-FTL'
+   assert_success
+   run bash -c "./pihole-FTL wait-for 'queries from the long-term database' /var/log/pihole/FTL.log 30 $logsize_import"
+   assert_success
+@@ -1151,7 +1155,7 @@ three.rename.ftl|new-rename.ftl"
+   assert_success
+ 
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c 'su pihole -s /bin/sh -c /home/pihole/pihole-FTL'
++  run bash -c 'as_pihole /home/pihole/pihole-FTL'
+   assert_success
+   run bash -c "./pihole-FTL wait-for 'queries from the long-term database' /var/log/pihole/FTL.log 30 $logsize_restart"
+   assert_success
+@@ -1233,7 +1237,7 @@ three.rename.ftl|new-rename.ftl"
+ 
+   # The counters are logged once the import has closed its gaps
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c "su pihole -s /bin/sh -c 'FTLCONF_files_database=${db} /home/pihole/pihole-FTL'"
++  run bash -c "as_pihole 'FTLCONF_files_database=${db} /home/pihole/pihole-FTL'"
+   assert_success
+   run bash -c "./pihole-FTL wait-for ' -> Known forward destinations' /var/log/pihole/FTL.log 30 $logsize_restart"
+   assert_success
+@@ -1266,7 +1270,7 @@ three.rename.ftl|new-rename.ftl"
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+   # Without the history of the earlier tests, the resolver has only the names
+   # of this test to look up
+-  run bash -c 'su pihole -s /bin/sh -c "FTLCONF_database_DBimport=false FTLCONF_resolver_resolveIPv4=true FTLCONF_resolver_refreshNames=ALL /home/pihole/pihole-FTL"'
++  run bash -c 'as_pihole "${CLIENT_NAMES_ENV} FTLCONF_database_DBimport=false FTLCONF_resolver_resolveIPv4=true FTLCONF_resolver_refreshNames=ALL /home/pihole/pihole-FTL"'
+   assert_success
+   run bash -c "./pihole-FTL wait-for ' -> Known forward destinations' /var/log/pihole/FTL.log 30 $logsize_restart"
+   assert_success
+@@ -1342,7 +1346,7 @@ three.rename.ftl|new-rename.ftl"
+   logsize_import=$(stat -c%s /var/log/pihole/FTL.log)
+   # The names come from the import, this instance resolves none. The API
+   # writes above put some of the first instance's settings into pihole.toml
+-  run bash -c 'su pihole -s /bin/sh -c "FTLCONF_database_DBimport=true FTLCONF_resolver_resolveIPv4=false FTLCONF_resolver_refreshNames=NONE /home/pihole/pihole-FTL"'
++  run bash -c 'as_pihole "FTLCONF_database_DBimport=true FTLCONF_resolver_resolveIPv4=false FTLCONF_resolver_refreshNames=NONE /home/pihole/pihole-FTL"'
+   assert_success
+   run bash -c "./pihole-FTL wait-for 'queries from the long-term database' /var/log/pihole/FTL.log 30 $logsize_import"
+   assert_success
+@@ -1386,7 +1390,7 @@ three.rename.ftl|new-rename.ftl"
+   assert_success
+ 
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c 'su pihole -s /bin/sh -c /home/pihole/pihole-FTL'
++  run bash -c 'as_pihole /home/pihole/pihole-FTL'
+   assert_success
+   run bash -c "./pihole-FTL wait-for ' -> Known forward destinations' /var/log/pihole/FTL.log 30 $logsize_restart"
+   assert_success
+@@ -1419,7 +1423,7 @@ three.rename.ftl|new-rename.ftl"
+   run bash -c "./pihole-FTL sqlite3 /etc/pihole/pihole-FTL.db \".timeout 5000\" \"WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c WHERE x < 600) INSERT INTO domain_by_id (domain) SELECT printf('%04d-%s.blocks.ftl', x, hex(zeroblob(296))) FROM c; INSERT OR IGNORE INTO client_by_id (ip, name) VALUES ('10.0.6.0', ''); INSERT INTO query_storage (timestamp, type, status, domain, client) SELECT $(( $(date +%s) - 60 )), 1, 3, d.id, c.id FROM domain_by_id d, client_by_id c WHERE d.domain LIKE '%.blocks.ftl' AND c.ip = '10.0.6.0' ORDER BY d.id;\""
+   assert_success
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c 'su pihole -s /bin/sh -c /home/pihole/pihole-FTL'
++  run bash -c 'as_pihole /home/pihole/pihole-FTL'
+   assert_success
+   run bash -c "./pihole-FTL wait-for 'queries from the long-term database' /var/log/pihole/FTL.log 30 $logsize_restart"
+   assert_success
+@@ -1444,7 +1448,7 @@ three.rename.ftl|new-rename.ftl"
+     if [[ -e "${f}" ]]; then mv "${f}" "${f}.kept"; fi
+   done
+   logsize_restart=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c 'su pihole -s /bin/sh -c /home/pihole/pihole-FTL'
++  run bash -c 'as_pihole /home/pihole/pihole-FTL'
+   assert_success
+   run bash -c "./pihole-FTL wait-for 'queries from the long-term database' /var/log/pihole/FTL.log 30 $logsize_restart"
+   assert_success
+diff --git test/test_suite.bats test/test_suite.bats
+index b5c951d2..7a770859 100644
+--- test/test_suite.bats
++++ test/test_suite.bats
+@@ -36,8 +36,13 @@ setup() {
+ @test "A leftover world-readable CLI password file is replaced" {
+   # test/run.sh leaves a 0666 cli_pw behind before FTL starts and keeps it open
+   holder=$(cat /tmp/cli_pw_holder.pid)
+-  run cat "/proc/${holder}/fd/0"
++  if [[ -e "/proc/${holder}/fd/0" ]]; then
++    run cat "/proc/${holder}/fd/0"
++  else
++    run cat /etc/cli_pw.stale
++  fi
+   kill "${holder}"
++  rm -f /etc/cli_pw.stale
+   assert_output "stale"
+   run stat -c '%a' /etc/pihole/cli_pw
+   assert_output "640"
+@@ -46,7 +51,7 @@ setup() {
+ }
+ 
+ @test "Running a second instance is detected and prevented" {
+-  run bash -c 'su pihole -s /bin/sh -c "./pihole-FTL -f"'
++  run bash -c 'as_pihole "./pihole-FTL -f"'
+    assert_output --partial "CRIT: pihole-FTL is already running"
+ }
+ 
+@@ -56,7 +61,7 @@ setup() {
+   files="/etc/pihole/pihole.toml /etc/pihole/dnsmasq.conf /etc/pihole/hosts/custom.list"
+   before=$(sha256sum ${files})
+   logsize=$(stat -c%s /var/log/pihole/FTL.log)
+-  run bash -c 'su pihole -s /bin/sh -c "FTLCONF_misc_check_load=false FTLCONF_dns_domain_name=second.lan FTLCONF_dns_hosts=\"10.0.200.1 second.ftl\" ./pihole-FTL -f"'
++  run bash -c 'as_pihole "FTLCONF_misc_check_load=false FTLCONF_dns_domain_name=second.lan FTLCONF_dns_hosts=\"10.0.200.1 second.ftl\" ./pihole-FTL -f"'
+   assert_output --partial "CRIT: pihole-FTL is already running"
+   run sha256sum ${files}
+   assert_output "${before}"
+@@ -258,8 +263,8 @@ setup() {
+   run bash -c "grep -c \"There is no record for 00:11:22:33:44:55 in the client table\" /var/log/pihole/FTL.log"
+   assert_line --index 0 "1"
+   # The query arrives on lo, which takes precedence over enp0s123 from the
+-  # network table. There is no client :lo, so the default group applies
+-  run bash -c "grep -c \"Using in-memory interface :lo of 127.0.0.6\" /var/log/pihole/FTL.log"
++  # network table. There is no client :lo (lo0 on FreeBSD), so the default group applies
++  run bash -c "grep -c \"Using in-memory interface :${LO} of 127.0.0.6\" /var/log/pihole/FTL.log"
+   assert_line --index 0 "1"
+   run bash -c "grep -c \"Found database interface 127.0.0.6 -> enp0s123\" /var/log/pihole/FTL.log"
+   assert_line --index 0 "0"
+@@ -1378,7 +1383,7 @@ except socket.timeout:
+   assert_success
+   after="$(grep -c ^ /var/log/pihole/FTL.log)"
+   run bash -c "sed -n \"${before},${after}p\" /var/log/pihole/FTL.log"
+-  assert_line --partial "**** new UDP IPv4 query[A] query \"localhost\" from lo/${ipv4}#53 "
++  assert_line --partial "**** new UDP IPv4 query[A] query \"localhost\" from ${LO}/${ipv4}#53 "
+ 
+   before="$(grep -c ^ /var/log/pihole/FTL.log)"
+   run bash -c "dig localhost +short +subnet=${ipv6}/128 +ednsopt=65001:020000000001 @127.0.0.1"
+@@ -1386,7 +1391,7 @@ except socket.timeout:
+   assert_success
+   after="$(grep -c ^ /var/log/pihole/FTL.log)"
+   run bash -c "sed -n \"${before},${after}p\" /var/log/pihole/FTL.log"
+-  assert_line --partial "**** new UDP IPv4 query[A] query \"localhost\" from lo/${ipv6}#53 "
++  assert_line --partial "**** new UDP IPv4 query[A] query \"localhost\" from ${LO}/${ipv6}#53 "
+ 
+   kill -SIGRTMIN+5 "$(cat /run/pihole-FTL.pid)"
+ 
+@@ -1422,13 +1427,18 @@ except socket.timeout:
+ 
+ @test "Local interfaces are added to the network table" {
+   # Use the first interface with a hardware address, fall back to lo
+-  iface="lo"
+-  for dir in /sys/class/net/*; do
+-    [[ "$(basename "${dir}")" != "lo" && -s "${dir}/address" ]] || continue
+-    iface="$(basename "${dir}")"
+-    break
+-  done
+-  mac="$(cat "/sys/class/net/${iface}/address")"
++  if [[ "$(uname -s)" == "FreeBSD" ]]; then
++    iface="$(ifconfig -l ether | awk '{ print $1 }')"
++    mac="$(ifconfig "${iface}" ether | awk '$1 == "ether" { print $2 }')"
++  else
++    iface="lo"
++    for dir in /sys/class/net/*; do
++      [[ "$(basename "${dir}")" != "lo" && -s "${dir}/address" ]] || continue
++      iface="$(basename "${dir}")"
++      break
++    done
++    mac="$(cat "/sys/class/net/${iface}/address")"
++  fi
+   addr="$(curl -s 127.0.0.1/api/network/interfaces | jq -r ".interfaces[] | select(.name == \"${iface}\") | .addresses[0].address")"
+   [[ -n "${mac}" && -n "${addr}" && "${addr}" != "null" ]]
+ 
+@@ -1678,7 +1688,7 @@ except socket.timeout:
+   run bash -c "sed -n \"${before},${after}p\" /var/log/pihole/FTL.log"
+ 
+   # Check for expected log lines
+-  assert_line --partial "new UDP IPv4 non-query[type=0] \"opcode\" from lo/127.0.0.1"
++  assert_line --partial "new UDP IPv4 non-query[type=0] \"opcode\" from ${LO}/127.0.0.1"
+   assert_line --partial "**** got cache reply: opcode is (null) "
+ }
+ 
+@@ -1698,7 +1708,7 @@ except socket.timeout:
+   run bash -c "sed -n \"${before},${after}p\" /var/log/pihole/FTL.log"
+ 
+   # Check for expected log lines
+-  assert_line --partial "new TCP IPv4 non-query[type=0] \"opcode\" from lo/127.0.0.1"
++  assert_line --partial "new TCP IPv4 non-query[type=0] \"opcode\" from ${LO}/127.0.0.1"
+   assert_line --partial "**** got cache reply: opcode is (null) "
+ }
+ 
+@@ -1956,7 +1966,8 @@ except socket.timeout:
+   assert_failure 3
+ 
+   run bash -c './pihole-FTL --config dns.revServers "[\"true,1.1.1.1,def,ghi\"]"'
+-  assert_line --regexp --index 0 'New dnsmasq configuration is not valid \(.+resolve at line [[:digit:]]+ of /etc/pihole/dnsmasq.conf.temp: "rev-server=1.1.1.1,def"\), config remains unchanged'
++  # The reason is gai_strerror()'s, which differs between C libraries
++  assert_line --regexp --index 0 'New dnsmasq configuration is not valid \(.+(resolve|resolve server name|not known) at line [[:digit:]]+ of /etc/pihole/dnsmasq.conf.temp: "rev-server=1.1.1.1,def"\), config remains unchanged'
+   assert_failure 3
+ 
+   run bash -c './pihole-FTL --config webserver.api.excludeClients "[\".*\",\"$$$\",\"[[[\"]"'
+@@ -2029,9 +2040,15 @@ except socket.timeout:
+ 
+ @test "Config validation: a document root that resolves to the root is rejected" {
+   # Lexically /proc/self/root is a directory of its own, but it is a link
+-  # the kernel plants to /, so it has to be judged by where it leads
+-  run bash -c './pihole-FTL --config webserver.paths.webroot /proc/self/root'
+-  assert_line --index 0 'Invalid value: webserver.paths.webroot: "/proc/self/root" resolves to "/", which must not be "/" or overlap Pi-hole'"'"'s configuration directory ("/etc/pihole")'
++  # the kernel plants to /, so it has to be judged by where it leads.
++  # Without /proc (FreeBSD) a link of our own does the same
++  rootlink=/proc/self/root
++  if [[ ! -e "${rootlink}" ]]; then
++    rootlink=/tmp/webroot-root
++    ln -sfn / "${rootlink}"
++  fi
++  run bash -c "./pihole-FTL --config webserver.paths.webroot ${rootlink}"
++  assert_line --index 0 'Invalid value: webserver.paths.webroot: "'"${rootlink}"'" resolves to "/", which must not be "/" or overlap Pi-hole'"'"'s configuration directory ("/etc/pihole")'
+   assert_failure 3
+ 
+   # A link into the configuration directory is caught the same way
+@@ -2170,7 +2187,7 @@ except socket.timeout:
+   # still holds the fork's argv and would let this test pass vacuously
+   ready=0
+   for _ in $(seq 1 100); do
+-    if tr '\0' ' ' < "/proc/${cli_pid}/cmdline" 2>/dev/null | grep -q 'pihole-FTL'; then
++    if proc_cmdline "${cli_pid}" 2>/dev/null | grep -q 'pihole-FTL'; then
+       ready=1
+       break
+     fi
+@@ -2185,7 +2202,7 @@ except socket.timeout:
+   fi
+ 
+   # argv holds only the "-" marker, never the password itself
+-  run bash -c "tr '\\0' ' ' < /proc/${cli_pid}/cmdline"
++  run bash -c "proc_cmdline ${cli_pid}"
+   assert_success
+   assert_output --partial "pihole-FTL --config webserver.api.password -"
+   refute_output --partial "FIFO_PW"
+diff --git test/toml_lock_fork.py test/toml_lock_fork.py
+index 3142fce5..b8d3d0ce 100644
+--- test/toml_lock_fork.py
++++ test/toml_lock_fork.py
+@@ -14,6 +14,7 @@ import fcntl
+ import json
+ import os
+ import socket
++import subprocess
+ import threading
+ import time
+ import urllib.request
+@@ -34,9 +35,21 @@ def patch_boxed(boxed):
+         r.read()
+ 
+ 
++# Without /proc (FreeBSD), ps(1) tells the same: a thread's wait channel and
++# a process's parent and state
++PROCFS = os.path.exists("/proc/locks")
++
++
++def ps(*args):
++    return subprocess.run(["ps", *args], capture_output=True, text=True).stdout
++
++
+ def lock_waiter():
+     """True once some process waits in flock() for the lock file. /proc/locks
+     is readable without CAP_SYS_PTRACE, FTL's /proc/<pid>/fd is not"""
++    if not PROCFS:
++        # FTL is the only process here that takes this lock
++        return "lockf" in ps("-H", "-o", "wchan=", "-p", str(pid)).split()
+     ino = os.stat(LOCK).st_ino
+     with open("/proc/locks") as f:
+         for line in f:
+@@ -49,6 +62,12 @@ def lock_waiter():
+ 
+ def children(pid):
+     kids = set()
++    if not PROCFS:
++        for line in ps("-ax", "-o", "pid=", "-o", "ppid=").splitlines():
++            child, parent = line.split()
++            if int(parent) == pid:
++                kids.add(int(child))
++        return kids
+     for entry in os.listdir("/proc"):
+         if not entry.isdigit():
+             continue
+@@ -63,6 +82,9 @@ def children(pid):
+ 
+ 
+ def alive(pid):
++    if not PROCFS:
++        state = ps("-o", "stat=", "-p", str(pid)).strip()
++        return state != "" and not state.startswith("Z")
+     try:
+         with open(f"/proc/{pid}/stat") as f:
+             return f.read().rsplit(")", 1)[1].split()[0] != "Z"
+diff --git test/webserver_tls_ports.bats test/webserver_tls_ports.bats
+index 14e4abd5..9da24104 100644
+--- test/webserver_tls_ports.bats
++++ test/webserver_tls_ports.bats
+@@ -95,7 +95,7 @@ s.bind(("::", 5443))
+ s.listen()
+ time.sleep(120)' > /dev/null 2>&1 3>&- &
+   echo $! > "${BATS_FILE_TMPDIR}/holder.pid"
+-  run bash -c 'for _ in $(seq 1 300); do netstat -ltn | grep -q ":5443 " && exit 0; sleep 0.1; done; exit 1'
++  run bash -c 'for _ in $(seq 1 300); do tcp_listening 5443 && exit 0; sleep 0.1; done; exit 1'
+   assert_success
+   set_ports "80o,[::]:80o,8081r,5443os,[::]:5443os,4443s"
+   run status_at 127.0.0.1 4443 --http2

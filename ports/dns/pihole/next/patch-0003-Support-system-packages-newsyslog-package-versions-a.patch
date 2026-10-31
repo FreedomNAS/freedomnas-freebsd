@@ -1,0 +1,186 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sarahmeow1986 <saretta1986@proton.me>
+Date: Thu, 22 Oct 2026 06:19:04 +0200
+Subject: [PATCH] Support system packages: newsyslog, package versions and
+ pkg-managed updates
+
+---
+ advanced/Scripts/piholeLogFlush.sh  |  9 +++++++--
+ advanced/Scripts/updatecheck.sh     | 10 ++++++++++
+ advanced/Scripts/utils.sh           | 13 +++++++++++++
+ advanced/Templates/pihole.newsyslog |  6 ++++++
+ gravity.sh                          |  4 ++--
+ pihole                              | 15 +++++++++++++++
+ 6 files changed, 53 insertions(+), 4 deletions(-)
+ create mode 100644 advanced/Templates/pihole.newsyslog
+
+diff --git advanced/Scripts/piholeLogFlush.sh advanced/Scripts/piholeLogFlush.sh
+index ed22b093..203ed419 100755
+--- advanced/Scripts/piholeLogFlush.sh
++++ advanced/Scripts/piholeLogFlush.sh
+@@ -43,7 +43,7 @@ fi
+ # The log paths come from the pihole-owned config, so never write to them as root
+ as_pihole() {
+     if [[ "${EUID}" -eq 0 ]]; then
+-        sudo -u pihole "$@"
++        run_as_pihole "$@"
+     else
+         "$@"
+     fi
+@@ -73,7 +73,12 @@ if [[ "$*" == *"once"* ]]; then
+     # Use logrotate's default state file so this run and the system's own
+     # scheduled logrotate (which also reads /etc/logrotate.d/pihole) agree on
+     # what's already been rotated, instead of rotating our logs twice.
+-    logrotate --force /etc/logrotate.d/pihole
++    if command -v logrotate >/dev/null 2>&1; then
++        logrotate --force /etc/logrotate.d/pihole
++    else
++        # BSD rotates with newsyslog, which signals FTL to reopen its logs
++        newsyslog -F -f /usr/local/etc/newsyslog.conf.d/pihole.conf
++    fi
+     if [[ "${quiet}" != true ]]; then
+         echo -e "${OVER}  ${TICK} Rotated logs"
+     fi
+diff --git advanced/Scripts/updatecheck.sh advanced/Scripts/updatecheck.sh
+index 7878ced4..494425a4 100755
+--- advanced/Scripts/updatecheck.sh
++++ advanced/Scripts/updatecheck.sh
+@@ -30,19 +30,29 @@ if [[ "$(id -u)" -eq 0 ]]; then
+     exit "$?"
+ fi
+ 
++# A system package ships no git checkout; its packaging leaves a .pkgversion
++# file with VERSION, BRANCH and HASH lines instead
++function get_package_value() {
++    [ -f "${1}/.pkgversion" ] || return 1
++    sed -n "s/^${2}=//p" "${1}/.pkgversion"
++}
++
+ function get_local_branch() {
+     # Return active branch
++    get_package_value "${1}" BRANCH && return
+     cd "${1}" 2>/dev/null || { echo "null"; return; }
+     git rev-parse --abbrev-ref HEAD || echo "null"
+ }
+ 
+ function get_local_version() {
+     # Return active version
++    get_package_value "${1}" VERSION && return
+     cd "${1}" 2>/dev/null || { echo "null"; return; }
+     git describe --tags --always 2>/dev/null || echo "null"
+ }
+ 
+ function get_local_hash() {
++    get_package_value "${1}" HASH && return
+     cd "${1}" 2>/dev/null || { echo "null"; return; }
+     git rev-parse --short=8 HEAD || echo "null"
+ }
+diff --git advanced/Scripts/utils.sh advanced/Scripts/utils.sh
+index 972d6b52..8c795cc8 100755
+--- advanced/Scripts/utils.sh
++++ advanced/Scripts/utils.sh
+@@ -189,3 +189,16 @@ mktemp_suffix() {
+   tmp="$(mktemp "${1}/tmp.XXXXXXXXXX")" || return 1
+   mv -n "${tmp}" "${tmp}${2}" && echo "${tmp}${2}"
+ }
++
++#######################
++# Runs a command as the pihole user
++# The BSDs use su from the base system: sudo is a package there, and it refuses
++# to run when root's own account is locked (FreeBSD: pw lock root)
++#######################
++run_as_pihole() {
++  if [[ "$(uname -s)" == "Linux" ]]; then
++    sudo -u pihole "$@"
++  else
++    su -m pihole -c 'exec "$0" "$@"' "$@"
++  fi
++}
+diff --git advanced/Templates/pihole.newsyslog advanced/Templates/pihole.newsyslog
+new file mode 100644
+index 00000000..488feb5b
+--- /dev/null
++++ advanced/Templates/pihole.newsyslog
+@@ -0,0 +1,6 @@
++# newsyslog(8) configuration for Pi-hole, the counterpart of the logrotate
++# template: FTL reopens its logs on SIGUSR2 (31)
++# logfilename                      [owner:group]  mode count size when  flags [/pid_file] [sig_num]
++/var/log/pihole/pihole.log         pihole:pihole  640  5     *    @T00  ZC    /var/run/pihole-FTL.pid 31
++/var/log/pihole/FTL.log            pihole:pihole  640  3     *    $W0D0 ZC    /var/run/pihole-FTL.pid 31
++/var/log/pihole/webserver.log      pihole:pihole  640  3     *    $W0D0 ZC    /var/run/pihole-FTL.pid 31
+diff --git gravity.sh gravity.sh
+index f97c807c..331d80b2 100755
+--- gravity.sh
++++ gravity.sh
+@@ -774,7 +774,7 @@ gravity_DownloadBlocklistFromUrl() {
+         if [ "$(id -un)" == "root" ]; then
+             # If we are root, we need to check if the pihole user has read permission
+             #  otherwise, we might read files that the pihole user should not be able to read
+-            if sudo -u pihole test -r "${file_path}"; then
++            if run_as_pihole test -r "${file_path}"; then
+                 echo -e "${OVER}  ${INFO} Using local file ${file_path}"
+             else
+                 echo -e "${OVER}  ${CROSS} Cannot read file (user 'pihole' lacks read permission)"
+@@ -838,7 +838,7 @@ gravity_DownloadBlocklistFromUrl() {
+         if [ "$(id -un)" == "root" ]; then
+           # The buffer belongs to the calling user, only the read must happen as pihole
+           # shellcheck disable=SC2024
+-          sudo -u pihole cat -- "${file_path}" >"${listCurlBuffer}"
++          run_as_pihole cat -- "${file_path}" >"${listCurlBuffer}"
+         else
+           cat -- "${file_path}" >"${listCurlBuffer}"
+         fi
+diff --git pihole pihole
+index f0d6dc59..990a416f 100755
+--- pihole
++++ pihole
+@@ -100,6 +100,8 @@ networkFlush() {
+ updatePiholeFunc() {
+   if [ -n "${DOCKER_VERSION}" ]; then
+     unsupportedFunc
++  elif [ -f "${PI_HOLE_SCRIPT_DIR}/packaged" ]; then
++    packagedFunc
+   else
+     shift
+     "${PI_HOLE_SCRIPT_DIR}"/update.sh "$@"
+@@ -110,6 +112,8 @@ updatePiholeFunc() {
+ repairPiholeFunc() {
+   if [ -n "${DOCKER_VERSION}" ]; then
+     unsupportedFunc
++  elif [ -f "${PI_HOLE_SCRIPT_DIR}/packaged" ]; then
++    packagedFunc
+   else
+     /etc/.pihole/automated\ install/basic-install.sh --repair
+     exit 0;
+@@ -135,6 +139,8 @@ chronometerFunc() {
+ uninstallFunc() {
+   if [ -n "${DOCKER_VERSION}" ]; then
+     unsupportedFunc
++  elif [ -f "${PI_HOLE_SCRIPT_DIR}/packaged" ]; then
++    packagedFunc
+   else
+     "${PI_HOLE_SCRIPT_DIR}"/uninstall.sh
+     exit 0
+@@ -412,6 +418,8 @@ piholeCheckoutFunc() {
+     echo "Please build a custom image following the steps at"
+     echo "https://github.com/pi-hole/docker-pi-hole?tab=readme-ov-file#building-the-image-locally"
+     exit 0
++  elif [ -f "${PI_HOLE_SCRIPT_DIR}/packaged" ]; then
++    packagedFunc
+   else
+     if [[ "$2" == "-h" ]] || [[ "$2" == "--help" ]]; then
+       echo "Switch Pi-hole subsystems to a different GitHub branch
+@@ -471,6 +479,13 @@ unsupportedFunc(){
+   exit 0
+ }
+ 
++# A system package installed Pi-hole when its packaging leaves a "packaged"
++# file naming the package manager; that one updates and repairs it
++packagedFunc(){
++  echo "Pi-hole was installed with $(cat "${PI_HOLE_SCRIPT_DIR}/packaged"), use it to update, repair or remove Pi-hole"
++  exit 0
++}
++
+ helpFunc() {
+   echo "Usage: pihole [options]
+ Example: 'pihole allow -h'

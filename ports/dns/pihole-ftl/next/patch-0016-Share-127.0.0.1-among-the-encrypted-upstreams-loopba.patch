@@ -1,0 +1,106 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: sarahmeow1986 <saretta1986@proton.me>
+Date: Sat, 31 Oct 2026 15:42:28 +0100
+Subject: [PATCH] Share 127.0.0.1 among the encrypted upstreams' loopback
+ tuples off Linux
+
+---
+ src/dotdoh/registry.c    | 28 ++++++++++++++++++++++++++--
+ test/dotdoh_regression.c |  9 +++++++++
+ 2 files changed, 35 insertions(+), 2 deletions(-)
+
+diff --git src/dotdoh/registry.c src/dotdoh/registry.c
+index d03c931c..76d256e1 100644
+--- src/dotdoh/registry.c
++++ src/dotdoh/registry.c
+@@ -45,6 +45,7 @@ static uint32_t g_tuple_addr[DOTDOH_MAX_UPSTREAMS];
+ static int g_tuple_port[DOTDOH_MAX_UPSTREAMS];
+ static bool g_tuple_ready = false;
+ 
++#ifdef __linux__
+ // Skip addresses in active use (127.0.0.1, 127.0.0.53) and a .0/.255 last octet.
+ static bool addr_excluded(uint32_t a)
+ {
+@@ -62,6 +63,25 @@ static bool addr_used(uint32_t a, int except)
+ 			return true;
+ 	return false;
+ }
++#endif
++
++// Is the tuple (a,port) already used by a slot other than `except`?
++static bool tuple_used(uint32_t a, int port, int except)
++{
++	for(int j = 0; j < DOTDOH_MAX_UPSTREAMS; j++)
++		if(j != except && g_tuple_addr[j] == a && g_tuple_port[j] == port)
++			return true;
++	return false;
++}
++
++// Linux routes all of 127.0.0.0/8 to the loopback interface. Elsewhere only the
++// addresses configured on it can be bound, by default 127.0.0.1 alone, so the
++// tuples share that address and differ in their port
++#ifdef __linux__
++#define TUPLE_FALLBACK_ADDR(i) (0x7f000000u | (47u << 16) | (11u << 8) | (uint32_t)((i) + 1))
++#else
++#define TUPLE_FALLBACK_ADDR(i) 0x7f000001u
++#endif
+ 
+ // (Re)draw a random tuple for one slot: a distinct non-excluded 127.0.0.0/8
+ // address and an unbiased unprivileged port. GRND_NONBLOCK so an unseeded CSPRNG
+@@ -70,12 +90,13 @@ static bool addr_used(uint32_t a, int except)
+ static void fill_slot(int i)
+ {
+ 	uint32_t a;
++#ifdef __linux__
+ 	for(;;)
+ 	{
+ 		uint8_t r[3];
+ 		if(getrandom(r, sizeof(r), GRND_NONBLOCK) != (ssize_t)sizeof(r))
+ 		{
+-			g_tuple_addr[i] = 0x7f000000u | (47u << 16) | (11u << 8) | (uint32_t)(i + 1);
++			g_tuple_addr[i] = TUPLE_FALLBACK_ADDR(i);
+ 			g_tuple_port[i] = DOTDOH_PORT_BASE + i + 1;
+ 			return;
+ 		}
+@@ -83,6 +104,9 @@ static void fill_slot(int i)
+ 		if(!addr_excluded(a) && !addr_used(a, i))
+ 			break;
+ 	}
++#else
++	a = TUPLE_FALLBACK_ADDR(i);
++#endif
+ 	g_tuple_addr[i] = a;
+ 
+ 	// Unprivileged port, drawn without modulo bias by rejection sampling over the
+@@ -95,7 +119,7 @@ static void fill_slot(int i)
+ 			g_tuple_port[i] = DOTDOH_PORT_BASE + i + 1;
+ 			return;
+ 		}
+-		if(r < 65536 - 1024)
++		if(r < 65536 - 1024 && !tuple_used(a, 1024 + (int)r, i))
+ 		{
+ 			g_tuple_port[i] = 1024 + (int)r;
+ 			return;
+diff --git test/dotdoh_regression.c test/dotdoh_regression.c
+index cb4e4ffc..a79e884f 100644
+--- test/dotdoh_regression.c
++++ test/dotdoh_regression.c
+@@ -273,9 +273,18 @@ static void test_registry(void)
+ 	const uint32_t a0 = dotdoh_tuple_addr(0);
+ 	EXPECT((a0 >> 24) == 127, "slot 0 address in 127.0.0.0/8 (%08x)", a0);
+ 	EXPECT((a0 & 0xff) != 0 && (a0 & 0xff) != 255, "slot 0 address avoids .0/.255");
++#ifdef __linux__
+ 	EXPECT(a0 != 0x7f000001u && a0 != 0x7f000035u, "slot 0 address avoids 127.0.0.1/.53");
++#else
++	// Only Linux routes all of 127.0.0.0/8 to the loopback interface
++	EXPECT(a0 == 0x7f000001u, "slot 0 address is 127.0.0.1 (%08x)", a0);
++#endif
+ 	EXPECT(dotdoh_tuple_addr(0) == a0, "slot 0 address stable");
++#ifdef __linux__
+ 	EXPECT(dotdoh_tuple_addr(1) != a0, "slots 0 and 1 have distinct addresses");
++#else
++	EXPECT(dotdoh_tuple_port(1) != dotdoh_tuple_port(0), "slots 0 and 1 have distinct ports");
++#endif
+ 	EXPECT(dotdoh_tuple_port(0) > 1023 && dotdoh_tuple_port(0) <= 65535, "slot 0 port %d in range", dotdoh_tuple_port(0));
+ 	EXPECT(dotdoh_tuple_addr(-1) == 0 && dotdoh_tuple_port(-1) == -1, "out-of-range -> 0 / -1");
+ 
