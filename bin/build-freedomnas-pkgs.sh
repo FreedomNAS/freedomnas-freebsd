@@ -188,12 +188,12 @@ for name in $COMPONENTS; do
     freedomnas-containers)
         pkgname=freedomnas-module-containers
         comment="FreedomNAS containers: AppJail jails on ZFS datasets, apps and a catalogue"
-        deps="freedomnas-core freedomnas-webui"
+        deps="freedomnas-core freedomnas-webui appjail $PYFLAVOR-director dnsmasq"
         ;;
     freedomnas-proxy)
         pkgname=freedomnas-module-proxy
         comment="FreedomNAS reverse proxy: Caddy with HTTPS for every web app"
-        deps="freedomnas-core freedomnas-webui"
+        deps="freedomnas-core freedomnas-webui caddy lego"
         ;;
     *)
         echo "build-freedomnas-pkgs.sh: unknown component $name" >&2
