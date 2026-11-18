@@ -43,9 +43,12 @@ jobs:
     timeout-minutes: 240
     steps:
       - name: Install the host tools
+        timeout-minutes: 10
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 qemu-utils xorriso xz-utils curl python3
+          sudo rm -f /var/lib/man-db/auto-update
+          apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          $apt update -qq
+          $apt install -y -qq --no-install-recommends qemu-system-x86 qemu-utils xorriso xz-utils curl python3
           ls -l /dev/kvm
 
       - name: Pick the ref to build
