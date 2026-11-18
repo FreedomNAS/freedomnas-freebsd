@@ -46,6 +46,7 @@ jobs:
         timeout-minutes: 10
         run: |
           sudo rm -f /var/lib/man-db/auto-update
+          sudo sed -i 's|http://azure.archive.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|' /etc/apt/sources.list.d/ubuntu.sources
           apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
           $apt update
           $apt install -y --no-install-recommends qemu-system-x86 qemu-utils xorriso xz-utils curl python3
