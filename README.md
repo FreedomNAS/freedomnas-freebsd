@@ -68,22 +68,27 @@ profile's `paths.config_dir` says, `/usr/local/etc/freedomnas`.
 
 ## Published repository
 
-`.forgejo/workflows/publish-packages.yml` builds the packages on the
-self-hosted runner and publishes them to Codeberg's generic registry, where
-a FreeBSD machine reads them as a pkg repository:
+`.github/workflows/publish-packages.yml` builds the packages on a GitHub
+runner (QEMU with KVM) and publishes them as the assets of a release of this
+repository, which a FreeBSD machine reads as a pkg repository (ADR-003 in
+freedomnas-specs):
 
 ```
-https://codeberg.org/api/packages/FreedomNAS/generic/freedomnas-freebsd/<major>-<group>
+https://github.com/FreedomNAS/freedomnas-freebsd/releases/download/pkg-<major>-<group>
 ```
+
+`gather-pushes` starts it ten minutes after the last push to a component
+(see freedomnas-deb's `docs/ci-setup.md`); it also runs every night and by
+hand. The Forgejo workflow under `.forgejo/` is switched off.
 
 | Run | Builds | Published as |
 |-----|--------|--------------|
-| `ref: dev` (also every night) | every component at `dev`, versioned `X.Y.Z.<commit stamp>` | `15-dev` |
-| `ref: main` | the newest release tag, `vX.Y.Z` | `15-main` |
+| `ref: dev` | every component at `dev`, versioned `X.Y.Z.<commit stamp>` | `pkg-15-dev` |
+| `ref: main` | the newest release tag, `vX.Y.Z` | `pkg-15-main` |
 
 Community modules are built in the same run: from their `dev` branch for
-`15-dev`, and from their own newest `vX.Y.Z` tag for `15-main` (a module
-with no tag yet is left out of `15-main`).
+`pkg-15-dev`, and from their own newest `vX.Y.Z` tag for `pkg-15-main` (a module
+with no tag yet is left out of `pkg-15-main`).
 
 A community module's repository, `freedomnas-<id>`, becomes the package
 `freedomnas-module-<id>`, the name the WebUI's Plugins page searches for; its
@@ -97,13 +102,12 @@ must sit beside this one), runs `ci/build-in-guest.sh` there —
 `bin/build-freedomnas-pkgs.sh`, then `pkg repo` with the signing key — and
 reads the result back from a scratch disk, with the guest's log. The
 catalogue is flat, the packages beside `meta.conf` and `packagesite.pkg`,
-because the registry has no directories. `bin/publish-codeberg.sh` uploads
-it, replacing files with the same name, and removes the packages the new
+because a release has no directories. `bin/publish-github.sh` uploads it,
+replacing files with the same name, and removes the packages the new
 catalogue no longer lists.
 
-Secrets: the private signing key as `FREEBSD_SIGNING_KEY` (the PEM of
-`freedomnas.key`, which stays out of git), and the organisation's
-`PACKAGE_REGISTRY_USER` / `PACKAGE_REGISTRY_TOKEN`. The public key is
+Secret: the private signing key as the organisation secret
+`FREEBSD_SIGNING_KEY` (the PEM of `freedomnas.key`, which stays out of git). The public key is
 `keys/freedomnas.pub` (sha256 `72828ec3…f6baf32a`), the same one
 freedomnas-profiles' `installer/installer-freebsd.json` writes.
 
@@ -115,7 +119,7 @@ public key as `/usr/local/etc/ssl/freedomnas.pub`, and
 
 ```
 FreedomNAS: {
-  url: "https://codeberg.org/api/packages/FreedomNAS/generic/freedomnas-freebsd/${VERSION_MAJOR}-main",
+  url: "https://github.com/FreedomNAS/freedomnas-freebsd/releases/download/pkg-${VERSION_MAJOR}-main",
   signature_type: "pubkey",
   pubkey: "/usr/local/etc/ssl/freedomnas.pub",
   enabled: yes
