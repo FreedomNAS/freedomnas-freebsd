@@ -40,8 +40,11 @@ if [ ! -f "$PORTSDIR/Mk/bsd.port.mk" ]; then
         branch=main
     fi
     echo "=== Ports framework ($branch) ==="
-    git clone -q --depth 1 --filter=blob:none --sparse --branch "$branch" \
-        https://git.FreeBSD.org/ports.git "$PORTSDIR"
+    for url in https://git.FreeBSD.org/ports.git https://github.com/freebsd/freebsd-ports.git; do
+        git clone -q --depth 1 --filter=blob:none --sparse --branch "$branch" "$url" "$PORTSDIR" && break
+        echo "build-ports.sh: $url unreachable, trying the next mirror" >&2
+    done
+    [ -f "$PORTSDIR/.git/HEAD" ] || { echo "build-ports.sh: no ports mirror reachable" >&2; exit 1; }
     git -C "$PORTSDIR" sparse-checkout set Mk Templates Keywords
 fi
 
