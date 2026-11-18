@@ -11,6 +11,7 @@ name: publish-packages
 # ref main builds the newest release tag (vX.Y.Z) into <major>-main.
 # Runs on the self-hosted runner's host, as root through sudo, like
 # build-images: QEMU needs KVM.
+# Switched off: the packages are built on GitHub (.github/workflows/).
 on:
   workflow_dispatch:
     inputs:
@@ -18,8 +19,6 @@ on:
         description: "Branch of the component repositories to build (dev or main)"
         type: string
         default: dev
-  schedule:
-    - cron: "57 4 * * *"
 
 env:
   REF: ${{ inputs.ref || 'dev' }}

@@ -247,7 +247,7 @@ print(json.dumps({
     "comment": e["COMMENT"],
     "desc": desc,
     "maintainer": e["MAINTAINER"],
-    "www": "https://codeberg.org/FreedomNAS/" + e["REPO"],
+    "www": "https://github.com/FreedomNAS/" + e["REPO"],
     "abi": e["ABI"] + ":*",
     "prefix": "/usr/local",
     "licenselogic": "single" if len(e["LICENSES"].split()) == 1 else "and",
