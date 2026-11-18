@@ -1,4 +1,5 @@
 name: publish-packages
+run-name: ${{ github.workflow }} (${{ inputs.ref || 'dev' }})
 
 # Builds the five FreedomNAS packages, the community modules
 # (freedomnas-module-<id>, from each module's dev branch or its own newest
