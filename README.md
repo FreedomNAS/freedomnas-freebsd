@@ -79,7 +79,7 @@ https://github.com/FreedomNAS/freedomnas-freebsd/releases/download/pkg-<major>-<
 
 `gather-pushes` starts it ten minutes after the last push to a component
 (see freedomnas-deb's `docs/ci-setup.md`); it also runs every night and by
-hand. The Forgejo workflow under `.forgejo/` is switched off.
+hand.
 
 | Run | Builds | Published as |
 |-----|--------|--------------|
