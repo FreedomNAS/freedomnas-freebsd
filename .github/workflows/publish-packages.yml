@@ -49,13 +49,16 @@ jobs:
           cands="azure.archive.ubuntu.com archive.ubuntu.com us.archive.ubuntu.com"
           [ ! -f /etc/apt/apt-mirrors.txt ] || cands="$(sed -n 's|^https\{0,1\}://\([^/[:space:]]*\)/.*|\1|p' /etc/apt/apt-mirrors.txt) $cands"
           cands="$(sed -n 's|^URIs: https\{0,1\}://\([^/]*\)/.*|\1|p' /etc/apt/sources.list.d/ubuntu.sources) $cands"
-          best="" best_speed=0
+          : > "$RUNNER_TEMP/mirrors"
           for m in $(printf '%s\n' $cands | awk '!seen[$0]++'); do
-            speed=$(curl -fs -o /dev/null -m 20 -w '%{speed_download}' "http://$m/ubuntu/dists/noble/main/binary-amd64/Packages.xz") || speed=0
+            speed=$(curl -fs -o /dev/null -m 20 -w '%{speed_download}' "http://$m/ubuntu/dists/noble/main/binary-amd64/Packages.xz") || continue
             echo "$m: $speed bytes/s"
-            if awk -v a="$speed" -v b="$best_speed" 'BEGIN { exit !(a > b) }'; then best=$m best_speed=$speed; fi
+            echo "$speed $m" >> "$RUNNER_TEMP/mirrors"
           done
-          [ -z "$best" ] || sudo sed -i -E "s|^URIs: .*|URIs: http://$best/ubuntu/|" /etc/apt/sources.list.d/ubuntu.sources
+          if [ -s "$RUNNER_TEMP/mirrors" ]; then
+            sort -rn "$RUNNER_TEMP/mirrors" | awk '{ printf "http://%s/ubuntu/\tpriority:%d\n", $2, NR }' | sudo tee /etc/apt/fnas-mirrors.txt
+            sudo sed -i -E "s|^URIs: .*|URIs: mirror+file:/etc/apt/fnas-mirrors.txt|" /etc/apt/sources.list.d/ubuntu.sources
+          fi
           grep '^URIs' /etc/apt/sources.list.d/ubuntu.sources
           apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
           $apt update
