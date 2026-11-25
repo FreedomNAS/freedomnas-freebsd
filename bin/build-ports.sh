@@ -20,7 +20,9 @@
 #
 # sysutils/freedomnas-nvmm is a kernel module: it needs the kernel sources,
 # installed from the FreeBSD-base (pkgbase) repository when /usr/src/sys is
-# missing. emulators/qemu needs it (libnvmm), so it comes first.
+# missing, and removed again once it is built, with the package cache after
+# every port: the build VM's disk is small. emulators/qemu needs it (libnvmm),
+# so it comes first.
 #
 # Runs on FreeBSD as root, after a `pkg update`.
 set -eu
@@ -54,7 +56,9 @@ if [ ! -f "$PORTSDIR/Mk/bsd.port.mk" ]; then
     git -C "$PORTSDIR" sparse-checkout set Mk Templates Keywords lang
 fi
 
+kernel_sources=""
 if [ ! -f /usr/src/sys/Makefile ]; then
+    kernel_sources=installed
     echo "=== Kernel sources (FreeBSD-src-sys) ==="
     mkdir -p /usr/local/etc/pkg/repos
     [ -f /usr/local/etc/pkg/repos/FreeBSD-base.conf ] ||
@@ -106,6 +110,11 @@ for entry in $PORTS; do
         cp "$pkgfile" "$DEST/"
         pkg add -f "$pkgfile"
     done
+    if [ "$port" = sysutils/freedomnas-nvmm ] && [ -n "$kernel_sources" ]; then
+        pkg delete -y FreeBSD-src-sys
+        kernel_sources=""
+    fi
+    pkg clean -ay
 done
 
 ls -l "$DEST"
