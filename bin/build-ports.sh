@@ -10,7 +10,8 @@
 # The ports framework comes from a shallow, sparse checkout of FreeBSD's ports
 # tree (Mk, Templates, Keywords) on the branch the machine's packages come
 # from: the current quarterly one (2026Q4) for a quarterly repository, main
-# otherwise. Each port is copied into it and its dependencies are installed as
+# otherwise, plus lang/ for the Perl and Python versions USES=perl5 and
+# USES=python read. Each port is copied into it and its dependencies are installed as
 # packages from the FreeBSD repository, so only the ports here are compiled.
 # A port that needs another one of these (dns/pihole needs dns/pihole-ftl)
 # comes after it in BUILD_ORDER, and the package just built is installed for
@@ -50,7 +51,7 @@ if [ ! -f "$PORTSDIR/Mk/bsd.port.mk" ]; then
         echo "build-ports.sh: $url unreachable, trying the next mirror" >&2
     done
     [ -f "$PORTSDIR/.git/HEAD" ] || { echo "build-ports.sh: no ports mirror reachable" >&2; exit 1; }
-    git -C "$PORTSDIR" sparse-checkout set Mk Templates Keywords
+    git -C "$PORTSDIR" sparse-checkout set Mk Templates Keywords lang
 fi
 
 if [ ! -f /usr/src/sys/Makefile ]; then
