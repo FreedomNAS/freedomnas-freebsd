@@ -18,6 +18,9 @@
 #   FREEBSD_RELEASE      the release whose VM image builds them (15.1-RELEASE)
 #   MODULES              community module checkouts beside this one to build
 #                        too, e.g. "freedomnas-containers"
+#   QEMU_MEM, QEMU_SMP   the guest's memory (MiB) and processors: 12288 and 4,
+#                        a GitHub runner's, since the ports build QEMU
+#   QEMU_GUEST_TIMEOUT   seconds the guest may take (10800)
 set -eu
 
 REPO_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
@@ -29,8 +32,10 @@ SCRIPT_DIR="$SRC_ROOT/freedomnas-image-builder/freebsd"
 [ -f "$SCRIPT_DIR/mfsbsd.sh" ] || { echo "build-in-vm.sh: no freedomnas-image-builder beside $REPO_DIR" >&2; exit 1; }
 FREEBSD_BACKEND=qemu
 FREEBSD_BUILD_ENV=vm
-QEMU_MEM="${QEMU_MEM:-4096}"
-export QEMU_MEM
+QEMU_MEM="${QEMU_MEM:-12288}"
+QEMU_SMP="${QEMU_SMP:-4}"
+QEMU_GUEST_TIMEOUT="${QEMU_GUEST_TIMEOUT:-10800}"
+export QEMU_MEM QEMU_SMP QEMU_GUEST_TIMEOUT
 . "$SCRIPT_DIR/mfsbsd.sh"
 
 for tool in git tar curl xz python3 qemu-system-x86_64 xorriso; do

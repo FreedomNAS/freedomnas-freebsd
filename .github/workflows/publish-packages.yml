@@ -3,7 +3,7 @@ run-name: ${{ github.workflow }} (${{ inputs.ref || 'dev' }})
 
 # Builds the five FreedomNAS packages, the community modules
 # (freedomnas-module-<id>, from each module's dev branch or its own newest
-# vX.Y.Z tag) and the ports under ports/ (Pi-hole) inside FreeBSD's own VM
+# vX.Y.Z tag) and the ports under ports/ (NVMM, QEMU with its NVMM patches, Pi-hole) inside FreeBSD's own VM
 # image (ci/build-in-vm.sh, through freedomnas-builder's QEMU driver, with
 # KVM), and publishes the signed catalogue as the release
 # pkg-<major>-<group> of this repository (bin/publish-github.sh).
