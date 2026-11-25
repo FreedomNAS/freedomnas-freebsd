@@ -31,7 +31,7 @@ LIB_DEPENDS+=	libfdt.so:sysutils/dtc \
 .endif
 .if ${FLAVOR:U} == nox11 || ${FLAVOR:U} == default
 LIB_DEPENDS+=	libnvmm.so:sysutils/freedomnas-nvmm
-CONFIGURE_ARGS+=	--enable-nvmm
+CONFIGURE_ARGS+=	--enable-nvmm --enable-pixman --enable-vnc
 .endif
 .if (${FLAVOR:U} != nox11 && ${FLAVOR:U} != tools && ${FLAVOR:U} != guestagent)
 LIB_DEPENDS+=	libepoxy.so:graphics/libepoxy
@@ -225,6 +225,8 @@ X86_TARGETS_LIB_DEPENDS_OFF=	libdw.so:devel/elfutils \
 	liblzo2.so:archivers/lzo2
 X86_TARGETS_USES_OFF=		xorg
 X86_TARGETS_USE_OFF=		XORG=pixman,x11
+X86_TARGETS_USES=		xorg
+X86_TARGETS_USE=		XORG=pixman
 X86_TARGETS_CONFIGURE_ON=	--target-list='i386-softmmu i386-bsd-user x86_64-softmmu x86_64-bsd-user'
 .endif
 
