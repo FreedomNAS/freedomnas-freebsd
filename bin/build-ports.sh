@@ -77,12 +77,24 @@ for entry in $PORTS; do
     mkdir -p "$PORTSDIR/$(dirname "$port")"
     cp -R "$REPO_DIR/ports/$port" "$PORTSDIR/$port"
 
+    # A dependency "name>=version:origin" is installed by its package name,
+    # which carries the flavor (py312-wheel); a bare origin with flavors
+    # (devel/py-wheel) would bring every Python's.
     deps=""
-    for origin in $(make -C "$PORTSDIR/$port" ${flavor:+FLAVOR="$flavor"} -V FETCH_DEPENDS -V EXTRACT_DEPENDS \
-            -V PATCH_DEPENDS -V BUILD_DEPENDS -V LIB_DEPENDS -V RUN_DEPENDS \
-            | tr ' ' '\n' | sed -n 's/^[^:]*:\([^:@]*\).*/\1/p' | sort -u); do
-        [ -d "$REPO_DIR/ports/$origin" ] || deps="$deps $origin"
+    for dep in $(make -C "$PORTSDIR/$port" ${flavor:+FLAVOR="$flavor"} -V FETCH_DEPENDS -V EXTRACT_DEPENDS \
+            -V PATCH_DEPENDS -V BUILD_DEPENDS -V LIB_DEPENDS -V RUN_DEPENDS | tr ' ' '\n' | sort -u); do
+        first=${dep%%:*}
+        origin=${dep#*:}
+        origin=${origin%%:*}
+        origin=${origin%@*}
+        [ -n "$origin" ] && [ "$origin" != "$dep" ] || continue
+        [ -d "$REPO_DIR/ports/$origin" ] && continue
+        case "$first" in
+        *[\<\>=]*) deps="$deps ${first%%[<>=]*}" ;;
+        *) deps="$deps $origin" ;;
+        esac
     done
+    deps=$(echo "$deps" | tr ' ' '\n' | sort -u | tr '\n' ' ')
     if [ -n "$deps" ]; then
         # shellcheck disable=SC2086
         pkg install -y $deps
