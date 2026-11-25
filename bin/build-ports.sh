@@ -102,7 +102,7 @@ for entry in $PORTS; do
     fi
 
     make -C "$PORTSDIR/$port" ${flavor:+FLAVOR="$flavor"} NOCLEANDEPENDS=yes clean package
-    for pkgfile in "$PORTSDIR/$port"/work/pkg/*.pkg; do
+    for pkgfile in "$PORTSDIR/$port"/work*/pkg/*.pkg; do
         cp "$pkgfile" "$DEST/"
         pkg add -f "$pkgfile"
     done
