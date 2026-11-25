@@ -1,0 +1,14 @@
+Build the NVMM accelerator on FreeBSD too, where the NVMM kernel module
+and libnvmm come from the FreedomNAS port of NVMM (NetBSD ABI v2).
+
+--- meson.build.orig
++++ meson.build
+@@ -924,7 +924,7 @@ if get_option('nitro').allowed() and host_os == 'linux'
+ endif
+ 
+ nvmm = not_found
+-if host_os == 'netbsd'
++if host_os == 'netbsd' or host_os == 'freebsd'
+   nvmm = cc.find_library('nvmm', required: get_option('nvmm'))
+   if nvmm.found()
+     accelerators += 'CONFIG_NVMM'

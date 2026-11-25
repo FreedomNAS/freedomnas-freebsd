@@ -1,0 +1,6 @@
+NVMM, the NetBSD Virtual Machine Monitor, ported to FreeBSD: the nvmm.ko
+kernel module (Intel VT-x with EPT), libnvmm, nvmmctl(8) and the libnvmm
+tests. QEMU uses it with -accel nvmm. It replaces vmm.ko (bhyve): the two
+cannot be loaded together.
+
+/dev/nvmm belongs to the nvmm group, which this package creates with GID 402.

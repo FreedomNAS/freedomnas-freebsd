@@ -1,0 +1,20 @@
+/%%KMODDIR%%/nvmm.ko
+/usr/include/dev/nvmm/nvmm.h
+/usr/include/dev/nvmm/nvmm_bitops.h
+/usr/include/dev/nvmm/nvmm_ioctl.h
+/usr/include/dev/nvmm/x86/nvmm_x86.h
+/usr/include/nvmm.h
+/usr/lib/libnvmm.a
+/usr/lib/libnvmm.so
+/usr/lib/libnvmm.so.0
+/usr/sbin/nvmmctl
+/usr/share/man/man3/libnvmm.3.gz
+/usr/share/man/man8/nvmmctl.8.gz
+/usr/tests/lib/libnvmm/Kyuafile
+/usr/tests/lib/libnvmm/h_io_assist
+/usr/tests/lib/libnvmm/h_mem_assist
+/usr/tests/lib/libnvmm/t_io_assist
+/usr/tests/lib/libnvmm/t_mem_assist
+@dir /usr/include/dev/nvmm/x86
+@dir /usr/include/dev/nvmm
+@dir /usr/tests/lib/libnvmm

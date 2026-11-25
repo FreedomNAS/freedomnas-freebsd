@@ -4,6 +4,7 @@
 #
 #   bin/build-ports.sh                    # every port, in BUILD_ORDER
 #   bin/build-ports.sh dns/pihole-ftl     # one of them
+#   bin/build-ports.sh emulators/qemu@nox11   # one flavor of a port
 #   PORTSDIR=/tmp/ports bin/build-ports.sh
 #
 # The ports framework comes from a shallow, sparse checkout of FreeBSD's ports
@@ -16,13 +17,17 @@
 # it. NOCLEANDEPENDS keeps `make clean` of a port from cleaning the ports it
 # depends on, and with them the packages just built there.
 #
+# sysutils/freedomnas-nvmm is a kernel module: it needs the kernel sources,
+# installed from the FreeBSD-base (pkgbase) repository when /usr/src/sys is
+# missing. emulators/qemu needs it (libnvmm), so it comes first.
+#
 # Runs on FreeBSD as root, after a `pkg update`.
 set -eu
 
 REPO_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 OUT="${OUT:-$REPO_DIR/out}"
 PORTSDIR="${PORTSDIR:-/usr/ports}"
-BUILD_ORDER="dns/pihole-ftl dns/pihole"
+BUILD_ORDER="sysutils/freedomnas-nvmm emulators/qemu@nox11 dns/pihole-ftl dns/pihole"
 PORTS="${*:-$BUILD_ORDER}"
 
 for tool in pkg git make; do
@@ -48,19 +53,31 @@ if [ ! -f "$PORTSDIR/Mk/bsd.port.mk" ]; then
     git -C "$PORTSDIR" sparse-checkout set Mk Templates Keywords
 fi
 
+if [ ! -f /usr/src/sys/Makefile ]; then
+    echo "=== Kernel sources (FreeBSD-src-sys) ==="
+    mkdir -p /usr/local/etc/pkg/repos
+    [ -f /usr/local/etc/pkg/repos/FreeBSD-base.conf ] ||
+        echo 'FreeBSD-base: { enabled: yes }' > /usr/local/etc/pkg/repos/FreeBSD-base.conf
+    pkg update -r FreeBSD-base
+    pkg install -y -r FreeBSD-base FreeBSD-src-sys
+fi
+
 export BATCH=yes PORTSDIR
 DEST="$OUT/ports/latest/All"
 mkdir -p "$DEST"
 
-for port in $PORTS; do
+for entry in $PORTS; do
+    port=${entry%@*}
+    flavor=""
+    [ "$port" = "$entry" ] || flavor=${entry#*@}
     [ -f "$REPO_DIR/ports/$port/Makefile" ] || { echo "build-ports.sh: no port $port" >&2; exit 1; }
-    echo "=== $port ==="
+    echo "=== $entry ==="
     rm -rf "${PORTSDIR:?}/$port"
     mkdir -p "$PORTSDIR/$(dirname "$port")"
     cp -R "$REPO_DIR/ports/$port" "$PORTSDIR/$port"
 
     deps=""
-    for origin in $(make -C "$PORTSDIR/$port" -V FETCH_DEPENDS -V EXTRACT_DEPENDS \
+    for origin in $(make -C "$PORTSDIR/$port" ${flavor:+FLAVOR="$flavor"} -V FETCH_DEPENDS -V EXTRACT_DEPENDS \
             -V PATCH_DEPENDS -V BUILD_DEPENDS -V LIB_DEPENDS -V RUN_DEPENDS \
             | tr ' ' '\n' | sed -n 's/^[^:]*:\([^:@]*\).*/\1/p' | sort -u); do
         [ -d "$REPO_DIR/ports/$origin" ] || deps="$deps $origin"
@@ -70,7 +87,7 @@ for port in $PORTS; do
         pkg install -y $deps
     fi
 
-    make -C "$PORTSDIR/$port" NOCLEANDEPENDS=yes clean package
+    make -C "$PORTSDIR/$port" ${flavor:+FLAVOR="$flavor"} NOCLEANDEPENDS=yes clean package
     for pkgfile in "$PORTSDIR/$port"/work/pkg/*.pkg; do
         cp "$pkgfile" "$DEST/"
         pkg add -f "$pkgfile"
