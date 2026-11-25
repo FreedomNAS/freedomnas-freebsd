@@ -94,7 +94,8 @@ for entry in $PORTS; do
         *) deps="$deps $origin" ;;
         esac
     done
-    deps=$(echo "$deps" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+    # shellcheck disable=SC2086
+    deps=$(printf '%s\n' $deps | sort -u | xargs)
     if [ -n "$deps" ]; then
         # shellcheck disable=SC2086
         pkg install -y $deps
